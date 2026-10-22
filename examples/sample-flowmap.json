@@ -1,0 +1,169 @@
+{
+  "title": "Claims Portal: how it works",
+  "subtitle": "Customer portal for signing in and filing insurance claims",
+  "description": "A plain-English map of the Claims Portal: the main parts of the system, what happens when a customer signs in or files a claim, and where claim data travels.",
+  "default_mode": "simple",
+  "start_view": "overview",
+  "repo": { "name": "claims-portal", "path": "testrepo", "url_base": "" },
+  "generated": {
+    "date": "2026-10-22",
+    "commit": "a1b2c3d",
+    "by": "Prepared with GitHub Copilot (Claude) using the codeflow-map skill",
+    "scope": "Whole repository: backend/, frontend/, sql/, jobs/",
+    "method": "Static scan (scan_repo.py) plus reading of the source files listed on each box",
+    "assumptions": [
+      "The fraud check result is not stored; the code calls the AI service but does not save its answer.",
+      "Production hosting and network setup are not in this repository and are not shown."
+    ],
+    "out_of_scope": ["Infrastructure / cloud configuration", "Third-party library internals"],
+    "open_questions": ["Who consumes the 'claim submitted' event downstream?"]
+  },
+  "views": [
+    {
+      "id": "overview",
+      "kind": "architecture",
+      "title": "Big picture",
+      "summary": "Customers use a website to sign in and file claims. The website talks to our claims service, which stores data in the company database, notifies other systems, and asks an AI service to flag possible fraud. A nightly job turns claims into a report.",
+      "technical_summary": "React SPA -> FastAPI (auth + claims routers) -> SQL Server (app schema) + Kafka topic claims.submitted + OpenAI; nightly pandas job builds rpt.daily_claims and a CSV.",
+      "direction": "LR",
+      "groups": [
+        { "id": "ours", "label": "Our systems", "description": "Everything built and run by the Claims team." },
+        { "id": "outside", "label": "Outside services", "description": "Services run by other teams or vendors that we depend on." }
+      ],
+      "nodes": [
+        { "id": "customer", "label": "Customer", "kind": "user", "description": "A policyholder using the online portal." },
+        { "id": "web", "label": "Customer website", "technical": "React SPA (frontend/src)", "kind": "ui", "group": "ours",
+          "description": "The screens the customer sees: sign-in and the claim form.", "files": ["frontend/src/App.tsx:3", "frontend/src/api/client.ts:2"], "confidence": "verified" },
+        { "id": "api", "label": "Claims service", "technical": "FastAPI app (backend/app/main.py)", "kind": "service", "group": "ours",
+          "description": "Checks who the customer is and handles new claims. All business rules live here.",
+          "why": "Single front door: every request from the website passes through it, so security checks happen in one place.",
+          "files": ["backend/app/main.py:2"], "confidence": "verified", "drilldown": "service-detail" },
+        { "id": "db", "label": "Company database", "technical": "SQL Server: app.users, app.claims, app.login_audit", "kind": "store", "group": "ours",
+          "description": "Keeps customer accounts, every claim, and a record of each sign-in.",
+          "data": ["Customer accounts", "Claims", "Sign-in history"], "sensitive_data": ["Email address", "Password (scrambled)", "Policy number"],
+          "controls": ["Passwords are stored scrambled, not as plain text", "Every sign-in is recorded for audit"],
+          "files": ["sql/schema.sql:1"], "confidence": "verified" },
+        { "id": "events", "label": "Claim alerts", "technical": "Kafka topic claims.submitted", "kind": "event", "group": "outside",
+          "description": "A message sent each time a claim is filed so other teams' systems can react.", "files": ["backend/app/services/claims_service.py:10"], "confidence": "verified" },
+        { "id": "ai", "label": "AI fraud check", "technical": "OpenAI chat.completions", "kind": "ai", "group": "outside",
+          "description": "An outside AI service asked to spot claims that look unusual.",
+          "risks": ["Claim details leave the company to reach this vendor", "The AI's answer is not currently saved"],
+          "files": ["backend/app/services/claims_service.py:5"], "confidence": "verified" },
+        { "id": "nightly", "label": "Nightly report job", "technical": "jobs/nightly_report.py", "kind": "schedule", "group": "ours",
+          "description": "Runs every night to summarise the day's claims.", "files": ["jobs/nightly_report.py:2"], "confidence": "verified" },
+        { "id": "report", "label": "Daily claims report", "technical": "claims_report.csv", "kind": "file",
+          "description": "A spreadsheet of the day's claims for the operations team.", "files": ["jobs/nightly_report.py:4"], "confidence": "verified" }
+      ],
+      "edges": [
+        { "from": "customer", "to": "web", "label": "signs in, files claim" },
+        { "from": "web", "to": "api", "label": "sends sign-in and claim details", "technical": "POST /api/login, POST /api/claims", "sensitive": true, "data": ["Email", "Password", "Claim details"] },
+        { "from": "api", "to": "db", "label": "checks account, saves claim", "technical": "SQLAlchemy session", "sensitive": true },
+        { "from": "api", "to": "events", "label": "announces new claim", "technical": "producer.send('claims.submitted')", "style": "dashed" },
+        { "from": "api", "to": "ai", "label": "asks for fraud risk", "technical": "OpenAI().chat.completions.create", "sensitive": true },
+        { "from": "nightly", "to": "db", "label": "reads the day's claims", "technical": "EXEC rpt.build_daily_claims" },
+        { "from": "nightly", "to": "report", "label": "writes report", "technical": "df.to_csv" }
+      ],
+      "walkthrough": [
+        { "text": "This is the whole Claims Portal on one page. Let's follow a customer from sign-in to a filed claim." },
+        { "target": "customer", "text": "It starts with a customer opening the portal in their browser." },
+        { "edge": ["web", "api"], "text": "Everything they type, including their password and claim details, is sent to our Claims service. This is sensitive data." },
+        { "target": "api", "text": "The Claims service is the single front door. It checks who the customer is and applies the business rules. Double-click it to see inside." },
+        { "edge": ["api", "db"], "text": "Accounts are checked against, and new claims are saved to, the company database." },
+        { "edge": ["api", "ai"], "text": "Each claim is also sent to an outside AI service for a fraud check. Note: claim data leaves the company here." },
+        { "group": "outside", "text": "These are the outside services we depend on." },
+        { "target": "nightly", "text": "Every night, a job summarises the day's claims into a report for the operations team." }
+      ]
+    },
+    {
+      "id": "service-detail",
+      "kind": "detail",
+      "title": "Inside the Claims service",
+      "summary": "The service is split into three layers: entry points that receive requests, business logic that makes decisions, and a data layer that talks to the database.",
+      "direction": "LR",
+      "groups": [
+        { "id": "entry", "label": "Entry points", "technical": "backend/app/api" },
+        { "id": "logic", "label": "Business logic", "technical": "backend/app/services" },
+        { "id": "data", "label": "Data access", "technical": "backend/app/db" }
+      ],
+      "nodes": [
+        { "id": "login_ep", "label": "Sign-in entry point", "technical": "POST /api/login -> login()", "kind": "service", "group": "entry", "description": "Receives the email and password typed on the sign-in screen.", "files": ["backend/app/api/auth.py:4"], "confidence": "verified" },
+        { "id": "claim_ep", "label": "New-claim entry point", "technical": "POST /api/claims -> create_claim()", "kind": "service", "group": "entry", "description": "Receives a completed claim form.", "files": ["backend/app/api/claims.py:4"], "confidence": "verified" },
+        { "id": "auth", "label": "Identity check", "technical": "authenticate_user()", "kind": "process", "group": "logic", "description": "Looks up the customer and confirms the password matches.", "controls": ["Rejects the sign-in if the account does not exist or the password is wrong"], "files": ["backend/app/services/auth_service.py:5"], "confidence": "verified" },
+        { "id": "pwd", "label": "Password match?", "technical": "verify_password()", "kind": "decision", "group": "logic", "description": "Compares the typed password with the stored one.", "risks": ["The comparison looks like a plain text match; confirm passwords are truly hashed"], "files": ["backend/app/services/auth_service.py:4"], "confidence": "verified" },
+        { "id": "token", "label": "Issue access pass", "technical": "issue_token() / JWT", "kind": "control", "group": "logic", "description": "Gives the browser a signed pass so the customer stays signed in.", "files": ["backend/app/services/auth_service.py:10"], "confidence": "verified" },
+        { "id": "submit", "label": "Process claim", "technical": "submit_claim()", "kind": "process", "group": "logic", "description": "Saves the claim, announces it, and requests a fraud check.", "files": ["backend/app/services/claims_service.py:7"], "confidence": "verified" },
+        { "id": "repo", "label": "Database helper", "technical": "db/repo.py", "kind": "process", "group": "data", "description": "The only code that reads from and writes to the database.", "files": ["backend/app/db/repo.py:3"], "confidence": "verified" },
+        { "id": "db2", "label": "Company database", "technical": "app.users / app.claims / app.login_audit", "kind": "store", "description": "See the Big picture for details.", "files": ["sql/schema.sql:1"], "confidence": "verified" }
+      ],
+      "edges": [
+        { "from": "login_ep", "to": "auth", "label": "email + password", "sensitive": true },
+        { "from": "auth", "to": "pwd", "label": "compare" },
+        { "from": "pwd", "to": "token", "label": "yes" },
+        { "from": "auth", "to": "repo", "label": "find account, log sign-in" },
+        { "from": "claim_ep", "to": "submit", "label": "claim form", "sensitive": true },
+        { "from": "submit", "to": "repo", "label": "save claim" },
+        { "from": "repo", "to": "db2", "label": "SQL", "style": "thick" }
+      ]
+    },
+    {
+      "id": "login-journey",
+      "kind": "journey",
+      "title": "Signing in",
+      "type": "sequence",
+      "summary": "What happens, step by step, from the moment a customer clicks 'Sign in' until they are let in.",
+      "groups": [{ "id": "ours", "label": "Our systems" }],
+      "participants": [
+        { "id": "cust", "label": "Customer", "kind": "user", "description": "The person signing in." },
+        { "id": "page", "label": "Sign-in screen", "technical": "LoginPage.tsx", "kind": "ui", "group": "ours", "description": "The web page with the email and password boxes.", "files": ["frontend/src/pages/LoginPage.tsx:2"] },
+        { "id": "svc", "label": "Claims service", "technical": "auth.login() + auth_service", "kind": "service", "group": "ours", "description": "Checks the customer's identity.", "files": ["backend/app/api/auth.py:5"] },
+        { "id": "dbase", "label": "Company database", "technical": "app.users, app.login_audit", "kind": "store", "group": "ours", "description": "Holds accounts and sign-in history.", "files": ["sql/schema.sql:1"] }
+      ],
+      "steps": [
+        { "section": "Customer enters details" },
+        { "from": "cust", "to": "page", "label": "types email and password", "sensitive": true },
+        { "from": "page", "to": "svc", "label": "sends them securely", "technical": "axios.post('/api/login')", "sensitive": true, "files": ["frontend/src/api/client.ts:2"] },
+        { "section": "We check who they are" },
+        { "from": "svc", "to": "dbase", "label": "looks up the account", "technical": "get_user_by_email()", "files": ["backend/app/db/repo.py:3"] },
+        { "from": "dbase", "to": "svc", "label": "account record", "reply": true },
+        { "from": "svc", "to": "dbase", "label": "records the sign-in", "technical": "log_login() -> INSERT app.login_audit", "note": "Audit trail", "controls": ["Every successful sign-in is logged"] },
+        { "section": "Customer is let in" },
+        { "from": "svc", "to": "page", "label": "returns an access pass", "technical": "JWT token", "reply": true },
+        { "from": "page", "to": "cust", "label": "shows their dashboard", "reply": true }
+      ]
+    },
+    {
+      "id": "claim-data",
+      "kind": "dataflow",
+      "title": "Where claim data goes",
+      "summary": "Follow one claim's details from the form to every place they end up. Red arrows carry personal or sensitive data.",
+      "direction": "LR",
+      "nodes": [
+        { "id": "form", "label": "Claim form", "kind": "ui", "description": "Customer enters policy number, amount and description.", "data": ["Policy number", "Amount", "Description"], "files": ["frontend/src/pages/ClaimForm.tsx:2"], "confidence": "verified" },
+        { "id": "svc", "label": "Claims service", "kind": "service", "description": "Receives and processes the claim.", "files": ["backend/app/services/claims_service.py:7"], "confidence": "verified" },
+        { "id": "claims_tbl", "label": "Claims table", "technical": "app.claims", "kind": "store", "description": "Permanent record of each claim.", "files": ["sql/schema.sql:2"], "confidence": "verified" },
+        { "id": "alert", "label": "Claim alert", "technical": "Kafka claims.submitted", "kind": "event", "description": "Copy of the claim broadcast to other systems.", "files": ["backend/app/services/claims_service.py:10"], "confidence": "verified" },
+        { "id": "downstream", "label": "Other teams' systems", "kind": "external", "description": "Unknown consumers of the claim alert.", "confidence": "inferred" },
+        { "id": "ai", "label": "AI fraud check", "kind": "ai", "description": "Outside vendor that reviews the claim.", "files": ["backend/app/services/claims_service.py:5"], "confidence": "verified" },
+        { "id": "daily", "label": "Daily summary table", "technical": "rpt.daily_claims", "kind": "store", "description": "Claims joined with customer details for reporting.", "files": ["sql/schema.sql:5"], "confidence": "verified" },
+        { "id": "csv", "label": "Daily claims report", "technical": "claims_report.csv", "kind": "file", "description": "Spreadsheet shared with operations.", "risks": ["Contains customer details; check who can access the file"], "files": ["jobs/nightly_report.py:4"], "confidence": "verified" }
+      ],
+      "edges": [
+        { "from": "form", "to": "svc", "label": "claim details", "sensitive": true },
+        { "from": "svc", "to": "claims_tbl", "label": "saved", "sensitive": true },
+        { "from": "svc", "to": "alert", "label": "full claim copied", "sensitive": true },
+        { "from": "alert", "to": "downstream", "label": "read by", "style": "dashed" },
+        { "from": "svc", "to": "ai", "label": "claim sent to vendor", "sensitive": true },
+        { "from": "claims_tbl", "to": "daily", "label": "nightly copy + customer info", "technical": "rpt.build_daily_claims", "sensitive": true },
+        { "from": "daily", "to": "csv", "label": "exported", "sensitive": true }
+      ]
+    },
+    {
+      "id": "data-model",
+      "kind": "other",
+      "title": "Data model",
+      "type": "mermaid",
+      "summary": "The main tables and how they relate (technical view).",
+      "mermaid": "erDiagram\n  USERS ||--o{ CLAIMS : files\n  USERS ||--o{ LOGIN_AUDIT : has\n  USERS { int id string email string password_hash }\n  CLAIMS { int id string policy_number decimal amount }\n  LOGIN_AUDIT { int user_id datetime at }"
+    }
+  ]
+}
