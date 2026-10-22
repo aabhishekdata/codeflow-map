@@ -74,3 +74,8 @@ environment variables by name only. The HTML contains only what is written in th
 Security Policy blocks all data requests; the only thing it may download is the pinned Mermaid library
 from cdn.jsdelivr.net (default build), and an `--offline` build downloads nothing. The builder refuses specs that appear to embed
 secrets and warns about anything that looks like personal data.
+
+## Licence
+
+MIT, see [LICENSE](LICENSE). The bundled Mermaid library keeps its own MIT licence
+([assets/vendor/MERMAID-LICENSE.txt](assets/vendor/MERMAID-LICENSE.txt)).
