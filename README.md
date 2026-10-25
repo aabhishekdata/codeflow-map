@@ -6,13 +6,35 @@ Turns a codebase into **one interactive HTML file** that explains how it works:
 - a **deep dive** into any module you choose: its dependencies, files, classes, call graph, the
   step-by-step **control flow** of its functions, a sequence of calls, data flow, data model and states,
   with hotspots, loops and possibly-unused code flagged;
+- a **code graph you can question in the browser**: who uses this, what does it use, what could break if
+  it changes, how does A reach B; code grouped by how it is really connected; surprising links; the
+  authors' WHY / TODO comments and the docs linked to the code;
 - a **stakeholder pack** in plain English: big picture with drill-downs, step-by-step journeys (for
   example, "user signs in") and where personal data flows.
 
 Diagrams are drawn with [Pele](https://pele.run) (MIT), a fast Mermaid renderer themed with CSS
 variables. The whole map is one file that works offline.
 
-## What's new in v2
+## What's new in v3
+
+Ideas adopted from [Graphify](https://github.com/Graphify-Labs/graphify), rebuilt so nothing needs
+installing and every question is answered inside the HTML:
+
+| | v2 | v3 |
+|---|---|---|
+| Ask the code questions | - | **Explore** tab: who uses X · what does X use · what could break if X changes · how does A reach B (or any database table) · everything around X; one-click suggested questions; "🔎 Explore from here" on any box; shareable links |
+| Groups | folders only | **Groups** tab: code grouped by how it is actually connected (Louvain, pure Python) |
+| Insights | hotspots | **Insights** tab: surprising links between groups, most-connected code; *Suggested questions* in the report |
+| Evidence on arrows | verified / inferred boxes | every arrow marked **found in the code** (solid) or **inferred** (dotted, e.g. matched by a unique name) |
+| The authors' reasons | - | WHY / NOTE / HACK / TODO / FIXME comments and ADR / RFC references attached to the code they explain |
+| Docs | - | README / docs / ADR files linked to the modules, files and functions they mention |
+| Re-runs | full | file cache keyed by content hash: unchanged files are not re-read; optional git hook (`scripts/hook.py`) rebuilds after each commit |
+| Other languages | Python, JS/TS, SQL, Prisma | + anything in a Graphify `graphify-out/graph.json` (Go, Java, Rust, ...) if the repo has one |
+| Export | - | `.codeflow/graph.json` in the node-link format Graphify uses |
+
+V1 and V2 specs build unchanged.
+
+## What was new in v2
 
 | | v1 | v2 |
 |---|---|---|
@@ -25,8 +47,6 @@ variables. The whole map is one file that works offline.
 | Themes and devices | light only | light / dark / auto, corporate colours, phone layout |
 | Drill-down | double-click | click → panel → **See inside** (double-click now zooms) |
 | Exports | SVG, Mermaid | + all views as Markdown, copy link to a view |
-
-V1 specs build unchanged.
 
 ## Install
 
@@ -68,6 +88,8 @@ terminal commands when prompted, then open the HTML by double-clicking it.
   watch-outs, source files. Boxes with a **+** badge open more detail.
 - **Drag** to move; **scroll**, **Ctrl + scroll** or **pinch** to zoom; double-click to zoom in or reset.
 - **Simple / Technical** labels · **🔒 Sensitive** data in red · **🔥 Hotspots** colouring · **◐** light / dark / auto.
+- **Groups** and **Insights** tabs; **Explore** tab to ask the code graph a question (big answers fold into
+  one box per module); dotted arrows are inferred, solid ones were found in the code.
 - **Search** (`/`) across every view, module and function; **▶ Walk me through** presenter mode (arrow
   keys / space).
 - **More**: About (scope, assumptions, open questions), full screen, print / PDF, SVG of the view,
@@ -89,8 +111,16 @@ python scripts/build_flowmap.py examples/sample-module-notes.json --modules path
 
 Builder options: `--check` (validate only), `--strict`, `--node <path>`, `--cdn` (small file that loads Pele from
 cdn.jsdelivr.net, pinned and integrity-checked), `--svg-dir <dir>` (one SVG per view). Analyzer options:
-`--select`, `--cfg file:function`, `--diff <branch>`, `--module-depth`, `--modules-config`, `--report`;
+`--select`, `--cfg file:function`, `--diff <branch>`, `--module-depth`, `--modules-config`, `--report`,
+`--resolution`, `--graphify <graph.json>` / `--no-graphify`, `--no-docs`, `--no-cache`;
 see `python scripts/analyze_modules.py --help`.
+
+Keep a map fresh after every commit (optional, removable):
+
+```
+python scripts/hook.py install --modules path/to/repo/.codeflow/modules.json
+python scripts/hook.py uninstall --repo path/to/repo
+```
 
 ## Files
 
@@ -98,6 +128,8 @@ see `python scripts/analyze_modules.py --help`.
 codeflow-map/
 ├── SKILL.md                          instructions Copilot follows
 ├── scripts/analyze_modules.py        module map + deep-dive views (Python ast; JS/TS via js_facts.cjs)
+├── scripts/codegraph.py              code graph, cache, groups, WHY / TODO notes, docs, Graphify reader
+├── scripts/hook.py                   optional git post-commit hook
 ├── scripts/js_facts.cjs              JavaScript / TypeScript facts with the vendored Babel parser
 ├── scripts/scan_repo.py              quick evidence scan for stakeholder views
 ├── scripts/build_flowmap.py          merges, validates, draws (pele_check.cjs) and builds the HTML
@@ -113,7 +145,7 @@ codeflow-map/
 ## Privacy
 
 Everything runs locally. The scripts never execute project code, never install packages, never use the
-network, skip `.env` files and report environment variables by name only. The HTML contains only the
+network (Graphify is never run; its output file is only read if present), skip `.env` files and report environment variables by name only. The HTML contains only the
 analysis and what is written in the spec; its Content Security Policy blocks all data requests. The
 default build downloads nothing; a `--cdn` build downloads only the pinned Pele library. The builder
 refuses specs that appear to embed secrets and warns about anything that looks like personal data.

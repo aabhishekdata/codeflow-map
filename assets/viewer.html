@@ -93,6 +93,22 @@ button{cursor:pointer}
 .facets select{border:1px solid var(--line-2);border-radius:8px;padding:4px 6px;background:var(--surface);max-width:260px}
 .facets .count{font-size:11px;color:var(--ink-3);margin-left:2px}
 
+.explore{display:none;padding:8px 16px 10px;background:var(--surface);border-bottom:1px solid var(--line)}
+.explore.on{display:block}
+.xrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.xrow select{border:1px solid var(--line-2);border-radius:8px;padding:6px 8px;background:var(--surface)}
+.xin{position:relative}
+.xin input{width:260px;border:1px solid var(--line-2);border-radius:8px;padding:6px 10px;background:var(--surface)}
+.xin .results{left:0;right:auto;width:360px}
+.xto{display:none;align-items:center;gap:8px;color:var(--ink-3)}
+.xto.on{display:inline-flex}
+.xqs{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center;font-size:12.5px;color:var(--ink-3)}
+.xqs button{border:1px solid var(--line-2);background:var(--surface-2);border-radius:999px;padding:4px 10px;font-size:12.5px;color:var(--ink-2)}
+.xqs button:hover{border-color:var(--accent);color:var(--accent-text)}
+.note{border-left:3px solid var(--line-2);padding:4px 8px;margin:0 0 6px;font-size:13px;line-height:1.45}
+.note.issue{border-left-color:var(--sens)}
+.note small,.docl small{display:block;color:var(--ink-3);font-family:var(--mono);font-size:11.5px}
+.docl{margin:0 0 6px;font-size:13px}
 .stage{position:relative;flex:1;min-height:0;overflow:hidden;
   background-image:radial-gradient(circle, var(--dot) 1px, transparent 1px);background-size:22px 22px}
 .diagram{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:28px 28px 64px;
@@ -184,6 +200,7 @@ dialog td:first-child{color:var(--ink-3);width:34%}
 .diagram svg .pele-edge.sens .pele-marker{stroke:var(--sens)}
 .diagram svg .pele-edge.sens .pele-marker:not([fill="none"]):not([fill="var(--_bg)"]){fill:var(--sens)}
 .diagram svg .pele-edge.cycle path:not(.pele-marker){stroke:var(--cycle);stroke-dasharray:7 4}
+.diagram svg .pele-edge.inf path:not(.pele-marker){stroke-dasharray:1.5 4;stroke-linecap:round}
 .diagram svg .pele-edge.cycle .pele-marker:not([fill="none"]){fill:var(--cycle)}
 .diagram svg .badge{pointer-events:none}
 .diagram svg .badge circle{fill:var(--accent);stroke:var(--surface);stroke-width:2}
@@ -212,6 +229,11 @@ dialog td:first-child{color:var(--ink-3);width:34%}
   .subbar{padding:6px 10px;gap:8px}
   .summary{flex-basis:100%;font-size:12.5px}
   .facets{padding:6px 10px}
+  .explore{padding:6px 10px}
+  .xqs{display:flex;flex-wrap:nowrap;overflow-x:auto;align-items:center;gap:6px;-webkit-overflow-scrolling:touch}
+  .xqs button{flex:0 0 auto}
+  .xin input{width:100%}
+  .xin{flex:1 1 100%}
   .legend{left:56px;max-width:calc(100% - 68px)}
   .panel{top:auto;left:8px;right:8px;bottom:8px;width:auto;height:58%;transform:translateY(calc(100% + 16px))}
   .panel.open{transform:none}
@@ -274,6 +296,21 @@ dialog td:first-child{color:var(--ink-3);width:34%}
   <div class="summary" id="summary"></div>
 </div>
 <nav class="facets" id="facets" aria-label="Views of this module"></nav>
+<section class="explore" id="explore" aria-label="Explore the code">
+  <div class="xrow">
+    <select id="xOp" aria-label="Question">
+      <option value="callers">Who uses it?</option>
+      <option value="callees">What does it use?</option>
+      <option value="path">How does it reach…?</option>
+      <option value="impact">What could break if it changes?</option>
+      <option value="neighbours">Everything around it</option>
+    </select>
+    <div class="xin"><input id="xFrom" type="search" autocomplete="off" placeholder="Function, class, file, table or module…" aria-label="Explore from"><div class="results" id="xFromRes" role="listbox"></div></div>
+    <span class="xto" id="xToWrap">to <span class="xin"><input id="xTo" type="search" autocomplete="off" placeholder="…or 'any database table'" aria-label="Explore to"><span class="results" id="xToRes" role="listbox"></span></span></span>
+    <button class="btn primary" id="xGo">Show</button>
+  </div>
+  <div class="xqs" id="xQs"></div>
+</section>
 <main class="stage" id="stage">
   <div class="diagram" id="diagram"></div>
   <div class="hint" id="hint">Drag to move · Ctrl + scroll, scroll or pinch to zoom · Click a box for details</div>
@@ -327,7 +364,7 @@ const App = (() => {
     start:['#DDF3E6','#2E8B57','#183B2A','#6FCF97'], end:['#ECEEF2','#5F6B7A','#2E323A','#A3ADBB'], loop:['#E8EEF9','#4A64A8','#22304A','#8FA8E3'],
     error:['#FDE8E4','#C2410C','#45231A','#F08A68']
   };
-  const VIEW_ICON = {architecture:'🏛', journey:'🧭', dataflow:'🔀', detail:'🔍', other:'📐', modules:'🧩', changes:'🟠'};
+  const VIEW_ICON = {architecture:'🏛', journey:'🧭', dataflow:'🔀', detail:'🔍', other:'📐', modules:'🧩', changes:'🟠', communities:'🫧', insights:'💡', explore:'🔎'};
   const FACETS = [['deps','Dependencies'],['files','Files'],['classes','Classes'],['calls','Call graph'],['control','Control flow'],
                   ['sequence','Sequence'],['dataflow','Data flow'],['datamodel','Data model'],['state','States']];
   const FACET_NAME = Object.fromEntries(FACETS);
@@ -457,6 +494,7 @@ const App = (() => {
       const ee = m.edge[i]; if (!ee || !ee.path) return;
       if (e.sensitive && S.sens) ee.path.classList.add('sens');
       if (e.cycle) ee.path.classList.add('cycle');
+      if (e.confidence === 'inferred') ee.path.classList.add('inf');
     });
     (v.steps || []).forEach((s, i) => { const me = m.msg[i]; if (me && s.sensitive && S.sens) me.path.classList.add('sens'); });
     // a small "+" badge on boxes that open further detail
@@ -611,12 +649,14 @@ const App = (() => {
     if (!opts.noFocus) hoverNode(id, true);
     const kind = v.type === 'er' ? 'store' : (n.kind || 'process');
     const kindChip = v.type === 'state' ? `<span class="chip">${n.kind === 'choice' ? 'Decision point' : 'State'}</span>` : chip(kind);
-    const head = `<h2>${esc(nodeLabel(n))}</h2>${kindChip}${n.stereotype ? `<span class="chip">«${esc(n.stereotype)}»</span>` : ''}${confChip(n.confidence)}${n.changed ? '<span class="chip" style="color:var(--changed);border-color:var(--changed)">Changed</span>' : ''}`;
+    const gk = gkeyOf(n), godRank = gk != null && GT.gods ? GT.gods.get(gk) : null;
+    const head = `<h2>${esc(nodeLabel(n))}</h2>${godRank ? `<span class="chip" title="Among the most-connected code (rank ${godRank})">🔗 Most-connected #${godRank}</span>` : ''}${kindChip}${n.stereotype ? `<span class="chip">«${esc(n.stereotype)}»</span>` : ''}${confChip(n.confidence)}${n.changed ? '<span class="chip" style="color:var(--changed);border-color:var(--changed)">Changed</span>' : ''}`;
     const attrs = v.type === 'er' ? (n.attributes || []).map(a => typeof a === 'string' ? a : `${a.name}${a.type ? ': ' + a.type : ''}${a.key ? ' (' + a.key + ')' : ''}`) : (n.attributes || []);
     const mod = n.id === 'self' && v.module ? moduleInfo(v.module) : (S.view.kind === 'modules' && n.module ? moduleInfo(n.module) : null);
     const body = (n.description ? `<h3>What it does</h3><p>${esc(n.description)}</p>` : '')
       + (n.why ? `<h3>Why it matters</h3><p>${esc(n.why)}</p>` : '')
       + actions(n)
+      + graphBlock(n)
       + mtable('Measures', n.metrics)
       + list('Data involved', n.data) + list('Sensitive data', n.sensitive_data, 'sens')
       + list(v.type === 'class' ? 'Fields' : 'Columns / fields', attrs) + list('Methods', n.methods)
@@ -629,7 +669,7 @@ const App = (() => {
     const v = S.view, e = relsOf(v)[i]; if (!e) return; const a = nodeById(e.from), b = nodeById(e.to);
     focusEdge(i);
     const nm = x => x ? nodeLabel(x) : '';
-    const head = `<h2>${esc(nm(a) || (e.from === '*' ? 'Start' : e.from))} → ${esc(nm(b) || (e.to === '*' ? 'End' : e.to))}</h2>${e.sensitive ? '<span class="chip tag sens">🔒 Carries sensitive data</span>' : ''}${e.cycle ? '<span class="chip" style="color:var(--cycle);border-color:var(--cycle)">Part of a loop</span>' : ''}`;
+    const head = `<h2>${esc(nm(a) || (e.from === '*' ? 'Start' : e.from))} → ${esc(nm(b) || (e.to === '*' ? 'End' : e.to))}</h2>${e.sensitive ? '<span class="chip tag sens">🔒 Carries sensitive data</span>' : ''}${e.cycle ? '<span class="chip" style="color:var(--cycle);border-color:var(--cycle)">Part of a loop</span>' : ''}${e.confidence === 'inferred' ? '<span class="chip badge-inf" title="Not confirmed by an import or a direct reference; matched by name or worked out by a rule">Inferred link</span>' : e.confidence === 'verified' ? '<span class="chip badge-ver">Found in code</span>' : ''}`;
     const body = `<h3>What happens</h3><p>${esc(edgeLabel(e) || (e.type ? e.type + ' relationship' : 'Connection'))}</p>`
       + (e.description ? `<p>${esc(e.description)}</p>` : '')
       + list(v.kind === 'modules' || v.facet === 'deps' || v.facet === 'files' ? 'Names imported' : 'Data passed', e.data) + bullets('Safeguards / controls', e.controls)
@@ -663,6 +703,7 @@ const App = (() => {
       const b = e.target.closest('button'); if (!b) return;
       if (b.dataset.open) return drill(b.dataset.open);
       if (b.dataset.module) return openModule(b.dataset.module);
+      if (b.dataset.explore) return runExplore(b.dataset.op || 'neighbours', b.dataset.explore);
       if (b.dataset.step) { const i = +b.dataset.step; showStep(i); camera(() => [S.maps.msg[i]?.path, S.maps.msg[i]?.label]); return; }
       if (b.dataset.node) { const id = b.dataset.node; showNode(id); camera(() => [S.maps.node[id]]); }
     });
@@ -680,6 +721,7 @@ const App = (() => {
     const sum = (S.mode === 'technical' && v.technical_summary) || v.summary || '';
     $('summary').innerHTML = (v.draft ? '<span class="chipx draft" title="Drawn automatically; check before relying on it">Draft</span>' : '') + esc(sum);
     renderFacets(v); renderLegend(v);
+    $('explore').classList.toggle('on', v.kind === 'explore');
     $('sensBtn').style.display = hasSensitive(v) ? '' : 'none';
     $('heatBtn').style.display = itemsOf(v).some(n => (n.heat || 0) > 0.12) ? '' : 'none';
     $('walkBtn').style.display = v.type === 'mermaid' ? 'none' : '';
@@ -711,6 +753,7 @@ const App = (() => {
       if ((v.edges || []).some(e => e.style === 'dashed')) items.push(`<span class="it">${ln('var(--ink-3)', 1)}${v.facet === 'control' ? 'Back to the loop' : 'Optional / indirect'}</span>`);
       if ((v.edges || []).some(e => e.style === 'thick')) items.push(`<span class="it"><span class="ln" style="border-top-width:4px;border-top-color:var(--ink-3)"></span>Main / heaviest path</span>`);
       if ((v.nodes || []).some(n => n.confidence === 'inferred')) items.push('<span class="it"><span class="sw" style="border-style:dashed;border-color:var(--ink-3)"></span>Inferred, not confirmed in code</span>');
+      if ((v.edges || []).some(e => e.confidence === 'inferred')) items.push(`<span class="it"><span class="ln" style="border-top:2px dotted var(--ink-3)"></span>Dotted = inferred link (matched by name, not confirmed)</span>`);
       if ((v.nodes || []).some(n => n.changed)) items.push('<span class="it"><span class="sw" style="border-color:var(--changed);border-width:3px"></span>Changed</span>');
     } else if (t === 'sequence') {
       items.push('<span class="it">Read top to bottom: each numbered arrow is one step</span>', '<span class="it">Solid arrow = request · dashed = reply · open arrow = no wait</span>');
@@ -745,7 +788,7 @@ const App = (() => {
     S.stack = inArea ? [...S.stack, v.id] : base === v.id ? [v.id] : [base, v.id];
     render(v.id);
   }
-  function setHash(id){ const h = '#view=' + encodeURIComponent(id); if (location.hash !== h) { S.lastHash = h; try { history.pushState(null, '', h); } catch (e) {} } }
+  function setHash(id){ const h = '#view=' + encodeURIComponent(id) + (id === 'explore' && S.xq ? '&q=' + encodeURIComponent(JSON.stringify(S.xq)) : ''); if (location.hash !== h) { S.lastHash = h; try { history.pushState(null, '', h); } catch (e) {} } }
   function fromHash(){
     const m = location.hash.match(/view=([^&]+)/); if (!m) return null;
     const id = decodeURIComponent(m[1]); return S.views[id] ? id : null;
@@ -755,14 +798,269 @@ const App = (() => {
     $('crumbs').addEventListener('click', e => { const b = e.target.closest('[data-crumb]'); if (!b) return; S.stack = S.stack.slice(0, +b.dataset.crumb + 1); render(S.stack[S.stack.length - 1]); });
     $('facets').addEventListener('click', e => { const b = e.target.closest('[data-facet-view]'); if (b && b.dataset.facetView !== S.view.id) drill(b.dataset.facetView); });
     $('facets').addEventListener('change', e => { if (e.target.matches('[data-facet-select]')) drill(e.target.value); });
-    window.addEventListener('popstate', () => { const id = fromHash(); if (id && id !== S.view?.id) navigateTo(id); });
+    window.addEventListener('popstate', () => { const id = fromHash(); if (id && (id !== S.view?.id || location.hash !== S.lastHash)) { S.lastHash = location.hash; navigateTo(id); } });
   }
   function navigateTo(id){
     const v = S.views[id];
+    if (id === 'explore') { const m = location.hash.match(/[&#]q=([^&]+)/); if (m) { try { const q = JSON.parse(decodeURIComponent(m[1])); return runExplore(q.op, q.from, q.to, true); } catch (e) {} } }
     if (v.kind !== 'detail') return openView(id);
     if (v.module) { const base = S.views.modules ? 'modules' : null; S.stack = base ? [base, id] : [id]; return render(id); }
     const parent = S.order.find(pid => itemsOf(S.views[pid]).some(n => n.drilldown === id) || (S.views[pid].groups || []).some(g => g.drilldown === id));
     S.stack = parent ? [parent, id] : [id]; render(id);
+  }
+
+  // ------------------------------------------------------------------ code graph (Explore)
+  const GT = {};
+  const FLOW = new Set(['calls', 'imports', 'inherits', 'reads', 'writes', 'renders', 'defines']);
+  const REL_TEXT = {calls:'calls', imports:'imports', inherits:'builds on', reads:'reads', writes:'writes', renders:'shows', defines:'defines',
+                    documents:'describes', explains:'explains', contains:'contains'};
+  const TYPE_TEXT = {module:'Module', file:'File', function:'Function', class:'Class', table:'Table', doc:'Document', note:'Note'};
+  function initGraph(){
+    const gr = S.data.graph; if (!gr || !Array.isArray(gr.nodes) || !Array.isArray(gr.edges)) return;
+    const N = gr.nodes.map((r, i) => ({ i, type: gr.types[r[0]], key: String(r[1]), label: String(r[2] ?? ''), module: r[3] >= 0 ? gr.modules[r[3]] : null,
+      line: r[4] || 0, comm: r[5], extra: r[6] || null }));
+    const E = gr.edges.map(r => ({ a: r[0], b: r[1], rel: gr.rels[r[2]], inf: r[3] === 1, line: r[4] || 0, note: r[5] || '' }));
+    const out = N.map(() => []), inn = N.map(() => []);
+    E.forEach((e, k) => { if (out[e.a] && inn[e.b]) { out[e.a].push(k); inn[e.b].push(k); } });
+    Object.assign(GT, { N, E, out, inn, byKey: new Map(N.map(n => [n.key, n.i])) });
+    GT.gods = new Map(((S.data.insights || {}).gods || []).map((g, i) => [g.key, i + 1]));
+    GT.cfg = new Map(S.order.map(id => S.views[id]).filter(v => v.facet === 'control' && v.function).map(v => [v.function, v.id]));
+    GT.hasTables = N.some(n => n.type === 'table');
+  }
+  const fileOf = n => {
+    if (n.type === 'note') return n.key.slice(2).replace(/:\d+$/, '');
+    if (n.type === 'doc') return (n.extra || {}).path || null;
+    if (['file', 'function', 'class'].includes(n.type)) return (n.key.startsWith('c:') ? n.key.slice(2) : n.key).split('::')[0];
+    return null;
+  };
+  function expand(i){   // a module, file or class stands for everything it contains
+    const set = new Set([i]); if (!['module', 'file', 'class'].includes(GT.N[i].type)) return set;
+    const st = [i];
+    while (st.length) { const x = st.pop(); GT.out[x].forEach(k => { const e = GT.E[k]; if (e.rel === 'contains' && !set.has(e.b)) { set.add(e.b); st.push(e.b); } }); }
+    return set;
+  }
+  function containerOf(x, set, s){   // link a contained item back to the thing the reader asked about
+    return x === s || !set.has(x) ? null : [s, x];
+  }
+  function gq(op, from, to){
+    const s = GT.byKey.get(from); if (s == null) return { error: 'That item is not in the code graph.' };
+    const R = { nodes: new Set([s]), edges: new Set(), synth: [], level: new Map([[s, 0]]), note: '' };
+    const add = k => { const e = GT.E[k]; R.edges.add(k); R.nodes.add(e.a); R.nodes.add(e.b); };
+    const S0 = expand(s);
+    const ordered = ks => ks.sort((x, y) => (GT.E[x].inf - GT.E[y].inf) || (GT.E[x].a - GT.E[y].a));
+    if (op === 'callers' || op === 'callees' || op === 'neighbours') {
+      const dirs = op === 'callers' ? ['in'] : op === 'callees' ? ['out'] : ['in', 'out'];
+      const ok = (e, d) => op === 'neighbours' ? e.rel !== 'contains' || S0.size < 40 : FLOW.has(e.rel) || (d === 'in' && (e.rel === 'documents' || e.rel === 'explains'));
+      const ks = [];
+      S0.forEach(x => dirs.forEach(d => (d === 'in' ? GT.inn : GT.out)[x].forEach(k => { const e = GT.E[k]; const other = d === 'in' ? e.a : e.b;
+        if (ok(e, d) && (!S0.has(other) || op === 'neighbours' && x === s)) ks.push(k); })));
+      ordered(ks).slice(0, 80).forEach(k => { add(k); const e = GT.E[k]; [e.a, e.b].forEach(x => { const c = containerOf(x, S0, s); if (c && !R.synth.some(y => y[1] === x)) R.synth.push(c); }); });
+      if (!R.edges.size) R.note = op === 'callers' ? 'Nothing in the code graph uses it (it may be called by a framework, a test, or from outside this code).' : 'It does not use anything else in this code.';
+      return R;
+    }
+    if (op === 'impact') {
+      let frontier = [...S0]; const seen = new Set(S0);
+      for (let depth = 1; depth <= 3 && R.nodes.size < 400; depth++) {
+        const next = [];
+        frontier.forEach(x => GT.inn[x].forEach(k => { const e = GT.E[k]; if (!FLOW.has(e.rel) || e.rel === 'defines') return;
+          if (!seen.has(e.a) && R.nodes.size < 400) { seen.add(e.a); next.push(e.a); R.level.set(e.a, depth); }
+          if (seen.has(e.a)) { add(k); const c = containerOf(x, S0, s); if (c && !R.synth.some(y => y[1] === x)) R.synth.push(c); } }));
+        frontier = next;
+      }
+      if (!R.edges.size) R.note = 'Nothing else in the code depends on it.';
+      else if (R.nodes.size >= 400) R.note = 'Very widely used, so the search stopped early.';
+      return R;
+    }
+    if (op === 'path') {
+      let T;
+      if (to === 'type:table') T = new Set(GT.N.filter(n => n.type === 'table').map(n => n.i));
+      else { const t = GT.byKey.get(to); if (t == null) return { error: 'Choose where the path should end.' }; T = expand(t); R.nodes.add(t); }
+      const bfs = (undirected) => {
+        const prev = new Map(); const q = [...S0]; S0.forEach(x => prev.set(x, null));
+        while (q.length) { const x = q.shift(); if (T.has(x) && !S0.has(x)) return { prev, end: x };
+          const step = (k, y) => { if (!prev.has(y)) { prev.set(y, k); q.push(y); } };
+          GT.out[x].forEach(k => { const e = GT.E[k]; if (FLOW.has(e.rel)) step(k, e.b); });
+          if (undirected) GT.inn[x].forEach(k => { const e = GT.E[k]; if (FLOW.has(e.rel)) step(k, e.a); });
+        }
+        return null;
+      };
+      let found = bfs(false);
+      if (!found) { found = bfs(true); if (found) R.note = 'Connected, but not in the direction of the calls: some links point the other way.'; }
+      if (!found) return { error: 'No link found between these two in the code graph.' };
+      let x = found.end; const chain = [];
+      while (found.prev.get(x) != null) { const k = found.prev.get(x); chain.push(k); const e = GT.E[k]; x = e.a === x ? e.b : e.a; }
+      chain.forEach(add); R.nodes.add(found.end);
+      const c = containerOf(x, S0, s); if (c) R.synth.push(c);
+      const t = GT.byKey.get(to); if (t != null && t !== found.end && expand(t).has(found.end)) R.synth.push([t, found.end]);
+      R.note = (R.note ? R.note + ' ' : '') + `${chain.length} step${chain.length === 1 ? '' : 's'}.`;
+      return R;
+    }
+    return { error: 'Unknown question.' };
+  }
+  function gDesc(n){
+    const f = fileOf(n);
+    if (n.type === 'note') return `${(n.extra || {}).tag || 'Note'} comment in ${f}:${n.line}: ${n.label}`;
+    if (n.type === 'doc') return `Documentation${(n.extra || {}).kind === 'adr' ? ' (decision record)' : ''}: ${(n.extra || {}).path}.`;
+    if (n.type === 'module') return (moduleInfo(n.key).summary || 'A part of the code.');
+    if (n.type === 'table') return 'A database table.';
+    return `${TYPE_TEXT[n.type]} in ${f}${n.line ? ' (line ' + n.line + ')' : ''}.`;
+  }
+  function gNode(i, R, op){
+    const n = GT.N[i], f = fileOf(n);
+    const kind = { function: /^[A-Z]+ \//.test(n.label) ? 'service' : 'function', class: 'process', file: 'file', module: 'module', table: 'store',
+                   doc: 'file', note: (n.extra || {}).group === 'issue' ? 'error' : 'control' }[n.type] || 'process';
+    const node = { id: 'g' + i, label: n.type === 'note' ? (((n.extra || {}).tag || 'NOTE') + ': ' + n.label).slice(0, 70) : n.label,
+      technical: n.key.replace(/^(c|t|n|doc):/, ''), kind, key: n.key, description: gDesc(n), confidence: 'verified',
+      files: f ? [f + ':' + (n.line || 1)] : [] };
+    if (n.type === 'function') { node.function = n.key; if (GT.cfg.get(n.key)) node.cfg_view = GT.cfg.get(n.key); }
+    if (n.type === 'module') node.module = n.key; else if (n.module && moduleFacets(n.module).length) node.module = n.module;
+    if (op === 'impact') node.group = 'lv' + (R.level.get(i) ?? 0);
+    else if (n.module) node.group = 'm:' + n.module;
+    return node;
+  }
+  function exploreView(op, from, to){
+    const R = gq(op, from, to);
+    const s = GT.byKey.get(from), start = s != null ? GT.N[s] : null;
+    const name = start ? start.label : from, toName = to === 'type:table' ? 'a database table' : (GT.byKey.has(to) ? GT.N[GT.byKey.get(to)].label : to);
+    const title = { callers: `Who uses ${name}?`, callees: `What does ${name} use?`, path: `How does ${name} reach ${toName}?`,
+                    impact: `What could break if ${name} changes?`, neighbours: `Everything around ${name}` }[op] || name;
+    if (R.error) return { id: 'explore', title: 'Explore', kind: 'explore', type: 'flowchart', summary: R.error, nodes: [{ id: 'msg', label: R.error, kind: 'end' }], edges: [], _q: title };
+    const ids = [...R.nodes];
+    if (ids.length > 30 && op !== 'path') return foldedView(R, s, op, title);
+    const nodes = ids.map(i => gNode(i, R, op));
+    const used = new Set(nodes.map(n => n.group).filter(Boolean));
+    const groups = op === 'impact'
+      ? [['lv0', 'What you asked about'], ['lv1', 'Uses it directly'], ['lv2', 'Two steps away'], ['lv3', 'Three steps away']].filter(([g]) => used.has(g)).map(([id, label]) => ({ id, label }))
+      : [...used].map(g => ({ id: g, label: (moduleInfo(g.slice(2)).label || g.slice(2)) }));
+    if (groups.length < 2) nodes.forEach(n => delete n.group);
+    const edges = [...R.edges].map(k => { const e = GT.E[k]; return { from: 'g' + e.a, to: 'g' + e.b, label: REL_TEXT[e.rel] || e.rel,
+      technical: e.rel + (e.line ? ' · line ' + e.line : ''), confidence: e.inf ? 'inferred' : 'verified',
+      description: (e.note ? 'In section: ' + e.note + '. ' : '') + (e.inf ? 'Inferred: worked out by matching names or a rule, not confirmed by an import.' : 'Found directly in the code.') }; });
+    R.synth.forEach(([a, b]) => { if (!edges.some(e => e.from === 'g' + a && e.to === 'g' + b)) edges.push({ from: 'g' + a, to: 'g' + b, label: 'contains', style: 'dashed', confidence: 'verified' }); });
+    const summary = `${title} ${R.note || ''} ${nodes.length} item${nodes.length === 1 ? '' : 's'} shown. Click any box for details, or "Explore from here" to keep going.`;
+    return { id: 'explore', title: 'Explore', kind: 'explore', type: 'flowchart', direction: op === 'impact' ? 'RL' : 'LR', groups: groups.length >= 2 ? groups : [], nodes, edges,
+             summary, technical_summary: summary, edge_labels: edges.length <= 30, _q: title };
+  }
+  function foldedView(R, s, op, title){   // big answers: one box per module (and step), with the names inside
+    const lvOf = i => i === s ? 0 : (op === 'impact' ? (R.level.get(i) ?? 1) : 1);
+    const raw = i => i === s ? 'start' : 'b' + lvOf(i) + ':' + (GT.N[i].module || 'other');
+    const count = new Map(); [...R.nodes].forEach(i => { const b = raw(i); count.set(b, (count.get(b) || 0) + 1); });
+    const keep = new Set(), PER_LEVEL = 8;   // the biggest modules per step keep their own box; the rest share one
+    [1, 2, 3].forEach(lv => [...count.keys()].filter(b => b.startsWith('b' + lv + ':')).sort((a, b) => count.get(b) - count.get(a))
+      .slice(0, PER_LEVEL).forEach(b => keep.add(b)));
+    const bucket = i => { const b = raw(i); return b === 'start' || keep.has(b) ? b : 'b' + lvOf(i) + ':*'; };
+    const groups = new Map();
+    [...R.nodes].forEach(i => { const b = bucket(i); if (!groups.has(b)) groups.set(b, []); groups.get(b).push(i); });
+    const nodes = [], idOf = {};
+    groups.forEach((items, b) => {
+      if (b === 'start') { const n = gNode(s, R, op); delete n.group; n.id = 'start'; nodes.push(n); idOf[b] = 'start'; return; }
+      const mid = b.split(':').slice(1).join(':'), lv = +b.slice(1).split(':')[0], mi = mid === '*' ? {} : moduleInfo(mid);
+      const id = 'k' + nodes.length; idOf[b] = id;
+      const nm = mid === '*' ? `Other parts (${new Set(items.map(i => GT.N[i].module)).size})` : (mi.label || 'Other');
+      const n = { id, label: `${nm}: ${items.length} item${items.length === 1 ? '' : 's'}`, technical: mi.path || mid, kind: 'module',
+        data: items.map(i => GT.N[i].label).slice(0, 40), confidence: 'verified',
+        description: `${items.length} item${items.length === 1 ? '' : 's'} in ${mi.label || 'other code'}. The names are listed below; explore from the module to see them drawn.` };
+      if (mid !== '*' && (mi.id || moduleFacets(mid).length)) { n.module = mid; n.key = mid; }
+      if (op === 'impact') n.group = 'lv' + lv;
+      nodes.push(n);
+    });
+    const agg = new Map();
+    [...R.edges].forEach(k => { const e = GT.E[k]; const a = idOf[bucket(e.a)], b = idOf[bucket(e.b)]; if (a === b) return;
+      if (op === 'impact' && lvOf(e.a) !== lvOf(e.b) + 1) return;   // keep only the steps toward what you asked about
+      const key = a + '>' + b + '>' + e.rel; const x = agg.get(key) || { from: a, to: b, rel: e.rel, n: 0, inf: true }; x.n++; if (!e.inf) x.inf = false; agg.set(key, x); });
+    (R.synth || []).forEach(([a0, b0]) => { const a = idOf[bucket(a0)], b = idOf[bucket(b0)]; if (a && b && a !== b && !agg.has(a + '>' + b + '>contains'))
+      agg.set(a + '>' + b + '>contains', { from: a, to: b, rel: 'contains', n: 1, inf: false }); });
+    const edges = [...agg.values()].map(x => ({ from: x.from, to: x.to, label: `${REL_TEXT[x.rel] || x.rel}${x.n > 1 ? ' ×' + x.n : ''}`, technical: x.rel + ' ×' + x.n,
+      confidence: x.inf ? 'inferred' : 'verified', style: x.n >= 5 ? 'thick' : 'solid' }));
+    const lvGroups = op === 'impact' ? [['lv1', 'Uses it directly'], ['lv2', 'Two steps away'], ['lv3', 'Three steps away']]
+      .filter(([g]) => nodes.some(n => n.group === g)).map(([id, label]) => ({ id, label })) : [];
+    const summary = `${title} ${R.note || ''} ${R.nodes.size} items, grouped by module. Click a box for the names.`;
+    return { id: 'explore', title: 'Explore', kind: 'explore', type: 'flowchart', direction: op === 'impact' ? 'RL' : 'LR', groups: lvGroups, nodes, edges,
+             summary, technical_summary: summary, edge_labels: edges.length <= 20, _q: title };
+  }
+  function runExplore(op, from, to, fromLink){
+    if (!GT.N) return toast('This map has no code graph (re-run analyze_modules.py).');
+    op = op || 'neighbours';
+    S.xq = { op, from, to: op === 'path' ? to : undefined };
+    S.views.explore = exploreView(op, from, to);
+    $('xOp').value = op; setInput('xFrom', from); setInput('xTo', op === 'path' ? to : '');
+    $('xToWrap').classList.toggle('on', op === 'path');
+    S.stack = ['explore']; render('explore');
+  }
+  function setInput(id, key){ const el = $(id); el.dataset.key = key || '';
+    el.value = !key ? '' : key === 'type:table' ? 'any database table' : (GT.byKey.has(key) ? GT.N[GT.byKey.get(key)].label + '  —  ' + key.replace(/^(c|t|n|doc):/, '') : key); }
+  function gSuggest(q, withTable){
+    q = q.trim().toLowerCase(); if (!q) return [];
+    const pri = { function: 0, class: 1, table: 2, file: 3, module: 4, doc: 5 };
+    const out = [];
+    for (const n of GT.N) {
+      if (n.type === 'note') continue;
+      const l = n.label.toLowerCase().replace(/\(\)$/, ''), k = n.key.toLowerCase();
+      const sc = l === q ? 0 : l.startsWith(q) ? 1 : l.includes(q) ? 2 : k.includes(q) ? 3 : -1;
+      if (sc >= 0) out.push({ n, sc: sc * 10 + (pri[n.type] ?? 6) });
+      if (out.length > 4000) break;
+    }
+    const res = out.sort((a, b) => a.sc - b.sc || a.n.label.length - b.n.label.length).slice(0, 30).map(x => x.n);
+    return withTable && GT.hasTables && 'any database table'.includes(q) ? [{ key: 'type:table', label: 'any database table', type: 'table' }, ...res] : res;
+  }
+  function setupExplore(){
+    if (!GT.N) return;
+    const qs = (S.data.insights || {}).questions || [];
+    $('xQs').innerHTML = qs.length ? 'Try: ' + qs.map((q, i) => `<button data-q="${i}">${esc(q.text)}</button>`).join('') : '';
+    $('xQs').addEventListener('click', e => { const b = e.target.closest('[data-q]'); if (!b) return; const q = qs[+b.dataset.q]; runExplore(q.op, q.from, q.to); });
+    $('xOp').addEventListener('change', () => $('xToWrap').classList.toggle('on', $('xOp').value === 'path'));
+    const wire = (inputId, resId, withTable) => {
+      const inp = $(inputId), res = $(resId); let hits = [], sel = 0;
+      const draw = () => { res.innerHTML = hits.map((n, i) => `<button class="${i === sel ? 'sel' : ''}" data-i="${i}">${esc(n.label)}<small>${esc(TYPE_TEXT[n.type] || '')} · ${esc(String(n.key).replace(/^(c|t|n|doc):/, ''))}</small></button>`).join('') || '<button disabled>No matches</button>'; res.style.display = 'block'; };
+      const pick = n => { setInput(inputId, n.key); res.style.display = 'none'; };
+      inp.addEventListener('input', () => { inp.dataset.key = ''; hits = gSuggest(inp.value, withTable); sel = 0; inp.value.trim() ? draw() : res.style.display = 'none'; });
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'ArrowDown') { sel = Math.min(sel + 1, hits.length - 1); draw(); e.preventDefault(); }
+        else if (e.key === 'ArrowUp') { sel = Math.max(sel - 1, 0); draw(); e.preventDefault(); }
+        else if (e.key === 'Enter') { if (res.style.display === 'block' && hits[sel]) pick(hits[sel]); else $('xGo').click(); e.preventDefault(); }
+        else if (e.key === 'Escape') res.style.display = 'none';
+      });
+      res.addEventListener('click', e => { const b = e.target.closest('[data-i]'); if (b) pick(hits[+b.dataset.i]); });
+      document.addEventListener('click', e => { if (!e.target.closest('#' + inputId) && !e.target.closest('#' + resId)) res.style.display = 'none'; });
+    };
+    wire('xFrom', 'xFromRes', false); wire('xTo', 'xToRes', true);
+    $('xGo').onclick = () => {
+      const op = $('xOp').value, from = $('xFrom').dataset.key || (gSuggest($('xFrom').value)[0] || {}).key;
+      const to = $('xTo').dataset.key || (gSuggest($('xTo').value, true)[0] || {}).key;
+      if (!from) return toast('Choose what to start from');
+      if (op === 'path' && !to) return toast('Choose where the path should end');
+      runExplore(op, from, to);
+    };
+    S.views.explore = { id: 'explore', title: 'Explore', kind: 'explore', type: 'flowchart', icons: false,
+      summary: 'Ask the code graph a question: pick something, choose a question, then Show. Or try one of the suggested questions.',
+      nodes: [{ id: 'hint', label: 'Pick something above, then Show', kind: 'start', description: 'The answer is drawn here.' }], edges: [] };
+    S.order.push('explore');
+  }
+  function gkeyOf(n){
+    const v = S.view; if (!n) return null;
+    return n.key || n.function || (n.id === 'self' && v.module) || ((v.kind === 'modules' || v.kind === 'changes') ? n.module : null) || null;
+  }
+  function graphBlock(n){
+    if (!GT.N) return '';
+    const key = gkeyOf(n); const i = key != null ? GT.byKey.get(key) : null; if (i == null) return '';
+    const node = GT.N[i];
+    const scope = expand(i); const notes = [], docs = [];
+    scope.forEach(x => GT.inn[x].forEach(k => { const e = GT.E[k], src = GT.N[e.a];
+      if (e.rel === 'explains' && notes.length < 60) notes.push(src);
+      if (e.rel === 'documents' && docs.length < 40 && !docs.some(d => d.doc === src)) docs.push({ doc: src, e }); }));
+    const why = notes.filter(x => (x.extra || {}).group !== 'issue'), issues = notes.filter(x => (x.extra || {}).group === 'issue');
+    const noteHtml = (arr, cls) => arr.slice(0, 8).map(x => `<div class="note ${cls}"><b>${esc((x.extra || {}).tag || 'NOTE')}</b> ${esc(x.label)}<small>${esc(fileOf(x) + ':' + x.line)}</small></div>`).join('')
+      + (arr.length > 8 ? `<p><small>…and ${arr.length - 8} more</small></p>` : '');
+    const adr = docs.filter(d => (d.doc.extra || {}).kind === 'adr');
+    let html = '';
+    if (why.length || adr.length) html += '<h3>Why it is like this</h3>' + noteHtml(why, '') + adr.slice(0, 4).map(d => `<div class="docl">📐 ${esc(d.doc.label)}${d.e.note ? ' › ' + esc(d.e.note) : ''}<small>${esc((d.doc.extra || {}).path + ':' + d.e.line)}</small></div>`).join('');
+    if (issues.length) html += '<h3>Known issues in the code</h3>' + noteHtml(issues, 'issue');
+    const other = docs.filter(d => (d.doc.extra || {}).kind !== 'adr');
+    if (other.length) html += '<h3>Documentation</h3>' + other.slice(0, 6).map(d => `<div class="docl">📄 ${esc(d.doc.label)}${d.e.note ? ' › ' + esc(d.e.note) : ''}${d.e.inf ? ' <span class="chip badge-inf" style="margin:0">name match</span>' : ''}<small>${esc((d.doc.extra || {}).path + ':' + d.e.line)}</small></div>`).join('');
+    const op = node.type === 'table' ? 'callers' : node.type === 'module' ? 'callees' : 'neighbours';
+    html += `<div class="actions"><button class="btn" data-explore="${esc(key)}" data-op="${op}">🔎 Explore from here</button>`
+      + (node.type === 'function' || node.type === 'class' || node.type === 'file' ? `<button class="btn" data-explore="${esc(key)}" data-op="impact">What could break if it changes?</button>` : '') + '</div>';
+    return html;
   }
 
   // ------------------------------------------------------------------ walkthrough
@@ -833,10 +1131,17 @@ const App = (() => {
         itemsOf(v).forEach(n => { const sc = score(n, v); if (sc != null) out.push({ vid, id: n.id, label: nodeLabel(n), where: where(v), pri: sc }); });
         (v.groups || []).forEach(g => { if ([g.label, g.technical, g.description].join(' ').toLowerCase().includes(q)) out.push({ vid, group: g.id, label: label(g), where: where(v) + ' (area)', pri: 25 }); });
       });
-      return out.sort((a, b) => a.pri - b.pri).slice(0, 50);
+      out.sort((a, b) => a.pri - b.pri);
+      if (GT.N && out.length < 40) {   // also anything in the code graph that no view shows
+        const shown = new Set();
+        S.order.forEach(vid => itemsOf(S.views[vid]).forEach(n => { const k = n.key || n.function; if (k) shown.add(k); }));
+        gSuggest(q).slice(0, 12).forEach(n => { if (!shown.has(n.key)) out.push({ graph: n.key, label: n.label, where: 'Code graph · ' + (TYPE_TEXT[n.type] || ''), pri: 99 }); });
+      }
+      return out.slice(0, 50);
     };
     const draw = () => { res.innerHTML = hits.map((h, i) => `<button class="${i === sel ? 'sel' : ''}" data-i="${i}">${esc(h.label)}<small>${esc(h.where)}</small></button>`).join('') || '<button disabled>No matches</button>'; res.style.display = 'block'; };
     const go = h => { res.style.display = 'none'; inp.blur();
+      if (h.graph) return runExplore(GT.N[GT.byKey.get(h.graph)].type === 'table' ? 'callers' : 'neighbours', h.graph);
       if (S.view.id !== h.vid) navigateTo(h.vid);
       if (h.group) { showGroup(h.group); camera(() => [S.maps.group[h.group]]); return; }
       showNode(h.id); camera(() => [S.maps.node[h.id]]);
@@ -959,6 +1264,7 @@ const App = (() => {
     $('subtitle').textContent = [d.subtitle, g.date && 'Prepared ' + g.date, g.commit && 'version ' + String(g.commit).slice(0, 10)].filter(Boolean).join(' · ');
     kindCss();
     setTheme(store.get('theme') || (d.theme && d.theme.mode) || 'auto');
+    initGraph(); setupExplore();
     setupPanel(); setupNav(); setupWalk(); setupSearch(); setupMenu(); setupToggles();
     const fromLink = fromHash();
     if (fromLink) navigateTo(fromLink);

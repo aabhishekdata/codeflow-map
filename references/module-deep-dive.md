@@ -35,6 +35,18 @@ Use `modules.json` (the module's entry under `modules`, and its views under `vie
 5. **Classes / Data model.** What the module stores and how records link. Personal-looking fields are
    flagged; confirm them.
 6. **Drafts (Sequence, Data flow).** Compare with what you read. Keep, correct or replace them.
+7. **WHY / NOTE / HACK / TODO / FIXME comments and docs.** The analyzer attaches them to the function,
+   class or file they sit in (`graph` nodes of type `note` and `doc`; shown in the panel under *Why it is
+   like this*, *Known issues* and *Documentation*). The authors' own reasons beat your guesses: use them
+   in `why`; mention open TODO / FIXME items in `risks` when they matter.
+8. **Groups and Insights.** If the module's files fall into several groups, it may be doing several jobs;
+   a surprising link out of the module is worth reading (often a shortcut or a misplaced helper).
+
+The *Explore* tab answers the questions you would otherwise trace by hand: *Who uses it?*, *What does it
+use?*, *What could break if it changes?* (everything that depends on it, up to three steps away) and
+*How does A reach B?* (the shortest chain of calls / imports; B may be "any database table"). Arrows
+drawn dotted are **inferred** (matched by a unique name, or a table guessed from the code that touches
+it); confirm them in the code before stating them as fact.
 
 ## 3. Write the enrichment spec
 
@@ -119,6 +131,9 @@ with file:line and one sentence of evidence. Do not change code unless asked.
 | **Possibly unused** | panel *Watch-outs*, report | The name appears nowhere else; confirm (dynamic use, frameworks, external callers) before removing |
 | **No test file imports it** | Measures, report | Untested; prioritise if it is also a hotspot |
 | **Personal data** in tables or flows | Data model, Data flow | Check masking, retention and who receives it |
+| **Most-connected** code | Insights, panel chip | Everything leans on it; changes ripple widely (check with *What could break*) |
+| **Surprising link** between groups | Insights | A shortcut across otherwise separate code; often a helper in the wrong place or a hidden dependency |
+| **TODO / FIXME / HACK** clusters | panel *Known issues*, report | Known debt the authors flagged themselves; prioritise where it meets a hotspot |
 
 Wording: factual, neutral, specific. "`update_article()` (article.service.ts:289) has 12 decision points
 and is the most-changed function in the module; it has no tests." Not "this code is bad".
@@ -127,5 +142,6 @@ and is the most-changed function in the module; it has no tests." Not "this code
 
 Static analysis cannot see: calls through callbacks, dependency injection, dynamic imports, decorators
 that register handlers, ORMs that build queries from strings, message consumers wired in config, and
-code in other repositories. When a picture depends on these, say so in `generated.assumptions` or mark
+code in other repositories. Inferred links (dotted) may be wrong when two things share a name. Files in
+other languages come only from a Graphify graph if the user made one. When a picture depends on these, say so in `generated.assumptions` or mark
 the box `"confidence": "inferred"`.

@@ -1,10 +1,10 @@
 ---
 name: codeflow-map
-argument-hint: "e.g. module map | dig into the billing module | how does create_user work | how login works | what changed since main"
-description: Builds one interactive, offline HTML map of how a codebase works. A module map shows every part of the code and how the parts depend on each other. A deep dive into any chosen module adds dependencies, files, classes, call graph, step-by-step control flow of its functions, sequence, data flow, data model and states, plus hotspots and possibly-unused code. Also big-picture architecture, user journeys and data lineage in plain English for stakeholders. The map has drill-down, zoom, click-for-details, light/dark themes and a presenter walkthrough. Use when asked to diagram, visualize, map, document, explain or improve code structure, a module, a function's logic, or how requests or data flow through a repository (Python, JavaScript/TypeScript, SQL, Prisma, notebooks).
+argument-hint: "e.g. module map | dig into the billing module | what could break if X changes | how login works | what changed since main"
+description: Builds one interactive, offline HTML map of how a codebase works. A module map shows the parts of the code and how they depend on each other; a deep dive into a chosen module adds dependencies, files, classes, call graph, control flow of its functions, sequence, data flow, data model and states, with hotspots and possibly-unused code. A code graph in the browser answers who-uses, what-could-break and how-does-A-reach-B questions, groups code by how it is really connected, links WHY / TODO comments and docs to the code and flags surprising links; Graphify output adds other languages. Also big-picture architecture, user journeys and data lineage in plain English for stakeholders. Use when asked to diagram, visualize, map, document, explain or improve code structure, a module, a function's logic, the impact of a change, or how requests or data flow through a repository (Python, JavaScript/TypeScript, SQL, Prisma, notebooks).
 ---
 
-# Code Flow Map (v2)
+# Code Flow Map (v3)
 
 Produce **one HTML file** that explains a codebase visually. It opens in any browser by double-click,
 works offline (the Pele drawing library, ~0.7 MB, is inlined; a typical map is 1-2 MB), and keeps file-level evidence behind every box.
@@ -16,6 +16,11 @@ It holds two kinds of picture, in any combination:
   graph, Control flow (one per function, picked from a list), Sequence, Data flow, Data model and States.
   Most of these are generated from the code by `analyze_modules.py`; you add plain-English explanations
   and the pictures that need judgment.
+- **Code graph** (new in v3). Every module, file, function, class, table, doc and WHY / TODO comment with
+  the links between them. The *Explore* tab answers questions in the browser (who uses X, what does X
+  use, what could break if X changes, how does A reach B); *Groups* shows code grouped by how it is
+  actually connected (not by folder); *Insights* shows surprising links and the most-connected code.
+  Every arrow is marked as found in the code (solid) or inferred (dotted).
 - **Stakeholder pack** (for people who do not read code). Big picture with drill-downs, step-by-step
   journeys ("user signs in") and data flow, written by you in plain English.
 
@@ -29,6 +34,8 @@ print / PDF; a phone-friendly layout.
 Files in this skill (paths are relative to this SKILL.md):
 - [scripts/analyze_modules.py](scripts/analyze_modules.py): module map and per-module views (Python `ast`; JS/TS through `scripts/js_facts.cjs` + the vendored Babel parser)
 - [scripts/scan_repo.py](scripts/scan_repo.py): quick evidence scan for stakeholder views (routes, screens, tables, queues, AI calls, call traces)
+- [scripts/codegraph.py](scripts/codegraph.py): code graph, file cache, groups, WHY / TODO comments, docs, Graphify reader (used by the analyzer)
+- [scripts/hook.py](scripts/hook.py): optional git post-commit hook that keeps the map fresh
 - [scripts/build_flowmap.py](scripts/build_flowmap.py): merges, validates, draws every view with Pele (`scripts/pele_check.cjs`), writes the HTML
 - [references/module-deep-dive.md](references/module-deep-dive.md): how to explore, explain and improve a chosen module
 - [references/spec-schema.md](references/spec-schema.md): every field of the spec (read before writing one)
@@ -86,10 +93,24 @@ suggestions, ask which module(s) to explore, and wait.**
 | `--path src/` / `--include-tests` | Limit the scope / treat tests as code |
 | `--no-drafts` | Skip the automatic sequence and data-flow drafts (when you write verified ones) |
 | `--report .codeflow/module-report.md` | Save the printed summary |
+| `--no-docs` | Do not link README / docs / ADR files to the code |
+| `--graphify <graph.json>` / `--no-graphify` | Use (or ignore) a Graphify graph; by default `graphify-out/graph.json` is read if present |
+| `--resolution 1.0` | Larger → more, smaller groups in the *Groups* tab |
+| `--no-cache` | Re-read every file (normally unchanged files come from `.codeflow/cache/`) |
 
-Add `.codeflow/` to `.gitignore` if the user does not want it committed. Re-running is cheap (a few
-seconds for a few hundred files, under a minute for about a thousand) and replaces `modules.json`; never
-edit that file by hand.
+The summary also lists the most-connected code, the groups, surprising links, WHY / TODO notes found,
+docs linked to code and *Suggested questions* (they become one-click questions in the *Explore* tab).
+
+Besides `modules.json` the analyzer writes `.codeflow/graph.json` (the code graph in the node-link format
+Graphify uses, for other tools) and `.codeflow/cache/` (facts per file, keyed by content hash). Add
+`.codeflow/` to `.gitignore` if the user does not want it committed. Re-running is cheap (unchanged files
+come from the cache) and replaces `modules.json`; never edit that file by hand.
+
+**Other languages.** codeflow-map parses Python, JavaScript / TypeScript, SQL and Prisma itself. If the
+repository has a Graphify output (`graphify-out/graph.json`, made by the user with the separate Graphify
+tool), files in other languages (Go, Java, Rust, ...) are taken from it: functions, classes, imports, calls
+and rationale comments. Do not install or run Graphify yourself; just mention it if most of the code is in
+a language codeflow-map does not parse.
 
 ## Step 2 - Deep dive the chosen module (1a, 1c)
 
@@ -110,8 +131,13 @@ Re-run Step 1 with `--select <module>` (plus `--cfg` for any function the user n
      use `--no-drafts` if the automatic ones add nothing.
    - Views the analyzer cannot draw, attached with `"module"` + `"facet"`: `state` for anything with a
      lifecycle (status fields, workflows), a `sequence` for the module's main use case.
-3. Report improvement findings in your reply, briefly and with evidence (file:line): hotspots, loops,
-   possibly-unused code, untested modules, risky data handling. Do not change code unless asked.
+3. Use the code graph to check your understanding before writing: `modules.json` → `graph` holds every
+   link with `prov` 0 (found in the code) or 1 (inferred), and `insights` holds the most-connected code,
+   surprising links and suggested questions. WHY / NOTE / HACK comments are the authors' own reasons:
+   use them in `why`, and quote TODO / FIXME in `risks` when they matter.
+4. Report improvement findings in your reply, briefly and with evidence (file:line): hotspots, loops,
+   possibly-unused code, untested modules, TODO / FIXME clusters, surprising links between groups, risky
+   data handling. Do not change code unless asked.
 
 ## Step 3 - Stakeholder views (1b, 1c)
 
@@ -154,9 +180,10 @@ Reply briefly with:
 - the file path and how to open it (double-click; Edge or Chrome; works offline);
 - what is in it: which tabs, which module was explored, which views are drafts;
 - how to use it: click a part on *Modules* → **See inside**; use the facet bar; pick a function under
-  *Control flow*; 🔥 *Hotspots*; ▶ *Walk me through* for presenting;
+  *Control flow*; *Explore* for questions (one-click suggested questions, or "🔎 Explore from here" on any
+  box); *Groups* and *Insights*; 🔥 *Hotspots*; ▶ *Walk me through* for presenting;
 - assumptions and open questions that need a human answer;
-- improvement findings (Step 2.3).
+- improvement findings (Step 2.4).
 
 Do not paste the spec back into chat.
 
@@ -173,6 +200,12 @@ Do not paste the spec back into chat.
 | Data flow (draft) | Where data comes in, which files handle it, where it is stored or sent | routes, ORM / SQL use, file I/O, HTTP |
 | Data model | Tables, fields (personal-looking ones flagged), links | ORM models, CREATE TABLE, Prisma schema |
 | States | Which states something moves through | written by you |
+
+| Tab | Question it answers |
+|---|---|
+| Groups | Which code really belongs together (groups found from the links, not the folders), and how the groups connect |
+| Insights | Which links between groups are surprising, which code everything depends on |
+| Explore | Who uses X? What does X use? What could break if X changes? How does A reach B (or any database table)? Big answers are folded into one box per module |
 
 Drafts are labelled **Draft** in the map. Check them before relying on them; replace them with verified
 views when the picture matters.
@@ -191,7 +224,12 @@ views when the picture matters.
 ## Updating a map
 
 Re-run `analyze_modules.py` (and `scan_repo.py` if you use it), edit the existing spec rather than
-starting over, update `generated.date` / `commit`, rebuild. Module ids come from folder paths and view ids
+starting over, update `generated.date` / `commit`, rebuild. Only changed files are re-read.
+
+To keep a map fresh automatically, offer (do not install unasked) the optional git hook:
+`python <skill>/scripts/hook.py install --modules .codeflow/modules.json`. After each commit it repeats
+the last analysis and build in the background (log in `.codeflow/hook.log`); `hook.py uninstall` removes
+only its own block, `hook.py status` shows whether it is on. Module ids come from folder paths and view ids
 from module ids, so notes keep working. Control-flow and sequence view ids follow ranking and can change,
 so key function notes by function id, never by view id.
 
@@ -206,4 +244,7 @@ so key function notes by function id, never by view id.
   `--select` for one module at a time. Readers can zoom; the phone layout re-flows automatically.
 - *Call graph misses a call*: calls through callbacks, dependency injection or framework wiring are not
   visible statically. Mention it, or add the link in your own view.
+- *An Explore answer is huge*: answers over 30 items are folded into one box per module (click it for the
+  names). Ask from a narrower starting point (a function rather than a file).
+- *Too many or too few groups*: `--resolution 1.5` (more, smaller) or `0.7` (fewer, larger).
 - *"This view could not be drawn"* in the browser: rebuild without `--no-node` to see the exact error.

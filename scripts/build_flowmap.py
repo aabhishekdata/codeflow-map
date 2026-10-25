@@ -41,7 +41,7 @@ PELE_CDN = "%s/npm/pele@%s/dist/pele.global.js" % (CDN_HOST, PELE_VERSION)
 
 KINDS = {"user", "ui", "process", "service", "store", "external", "decision", "event", "file", "control", "ai",
          "schedule", "module", "function", "package", "start", "end", "loop", "error"}
-VIEW_KINDS = {"architecture", "journey", "dataflow", "detail", "other", "modules", "changes"}
+VIEW_KINDS = {"architecture", "journey", "dataflow", "detail", "other", "modules", "changes", "communities", "insights"}
 TYPES = {"flowchart", "sequence", "class", "er", "state", "mermaid"}
 FACETS = {"deps", "files", "classes", "calls", "control", "sequence", "dataflow", "datamodel", "state"}
 DIRECTIONS = {"LR", "RL", "TB", "TD", "BT"}
@@ -154,6 +154,9 @@ def merge(spec, mods):
                         node[k] = fn[k]
                 if fn.get("risks"):
                     node["risks"] = list(fn["risks"]) + [r for r in node.get("risks", []) if r not in fn["risks"]]
+    for key in ("graph", "insights"):   # v3: code graph for the Explore tab, insights for suggested questions
+        if mods.get(key):
+            out[key] = mods[key]
     repo = mods.get("repo", {})
     out.setdefault("title", "%s: how the code is organised" % repo.get("name", "Code base"))
     out.setdefault("repo", repo)
@@ -249,7 +252,7 @@ def validate(spec):
         if not isinstance(v, dict):
             continue
         W = "views[%s]" % v.get("id", vi)
-        generated = bool(v.get("generated")) or (bool(v.get("module")) and v.get("kind") == "detail" and v.get("draft")) or v.get("kind") in ("modules", "changes")
+        generated = bool(v.get("generated")) or (bool(v.get("module")) and v.get("kind") == "detail" and v.get("draft")) or v.get("kind") in ("modules", "changes", "communities", "insights")
         vtype = v.get("type", "flowchart")
         if vtype not in TYPES:
             rep.err(W, "type '%s' must be one of %s" % (vtype, sorted(TYPES)))
@@ -419,6 +422,14 @@ def validate(spec):
 
     if tab_views == 0:
         rep.err("spec", "every view is kind 'detail'; at least one top-level view is needed")
+    gr = spec.get("graph")
+    if gr is not None:
+        ok = isinstance(gr, dict) and isinstance(gr.get("nodes"), list) and isinstance(gr.get("edges"), list)
+        if ok:
+            n = len(gr["nodes"])
+            ok = all(isinstance(e, list) and len(e) >= 5 and isinstance(e[0], int) and isinstance(e[1], int) and 0 <= e[0] < n and 0 <= e[1] < n for e in gr["edges"])
+        if not ok:
+            rep.err("spec.graph", "the code graph is damaged; re-run analyze_modules.py")
     known_fns = {v.get("function") for v in views if isinstance(v, dict)} | \
         {n.get("function") for v in views if isinstance(v, dict) for n in (v.get("nodes") or []) if isinstance(n, dict)}
     for i, f in enumerate(spec.get("functions", []) or []):
@@ -627,6 +638,13 @@ def main(argv=None):
         return 0
     mode = "cdn" if a.cdn else "offline"
     f = build(full, a.out, mode)
+    if a.modules:   # remembered so the optional git hook (scripts/hook.py) can rebuild the same map
+        try:
+            last = Path(a.modules).resolve().parent / "last-build.json"
+            last.write_text(json.dumps({"spec": str(Path(a.spec).resolve()) if a.spec else None, "modules": str(Path(a.modules).resolve()),
+                                        "out": str(Path(a.out).resolve()), "cdn": bool(a.cdn)}, indent=1), encoding="utf-8")
+        except OSError:
+            pass
     size = f.stat().st_size / 1e6
     how = "loads the Pele library from %s when opened (needs internet; rebuild without --cdn for an offline file)" % CDN_HOST \
         if mode == "cdn" else "works fully offline"

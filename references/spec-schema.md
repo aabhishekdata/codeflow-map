@@ -1,9 +1,9 @@
-# Flow map spec (flowmap.json), version 2
+# Flow map spec (flowmap.json), version 3
 
 One JSON file describes your part of the map. `build_flowmap.py` merges it with the module analysis
 (`--modules .codeflow/modules.json`, written by `analyze_modules.py`), validates everything, draws every
 view with Pele and builds the HTML. Copy the shape of `examples/sample-flowmap.json` (stakeholder views)
-or `examples/sample-module-notes.json` (module enrichment). Version 1 specs build unchanged.
+or `examples/sample-module-notes.json` (module enrichment). Version 1 and 2 specs build unchanged.
 
 ## Top level
 
@@ -41,7 +41,7 @@ function's box in every call graph and above its control-flow view.
 |---|---|---|
 | `id` | yes | Unique, stable, no spaces (e.g. `overview`, `login-journey`) |
 | `title` | yes | Tab / breadcrumb name, 1-4 words |
-| `kind` | | `architecture` · `journey` · `dataflow` · `detail` · `other` (top-level tabs) · `modules` · `changes` (written by the analyzer). `detail` views are hidden from the tabs and reached by drill-down or a module's facet bar |
+| `kind` | | `architecture` · `journey` · `dataflow` · `detail` · `other` (top-level tabs) · `modules` · `changes` · `communities` · `insights` (written by the analyzer). `detail` views are hidden from the tabs and reached by drill-down or a module's facet bar |
 | `type` | | `flowchart` (default) · `sequence` · `class` · `er` · `state` · `mermaid` |
 | `module` | | Module id: shows the view in that module's facet bar (use with `kind: "detail"`) |
 | `facet` | | Which tab of the facet bar: `deps` · `files` · `classes` · `calls` · `control` · `sequence` · `dataflow` · `datamodel` · `state`, or any other word (its own tab). Several views with the same facet get a picker |
@@ -80,6 +80,7 @@ function's box in every call graph and above its control-flow view.
 | `risks` | Factual watch-outs observed ("Claim data is sent to an outside vendor") |
 | `technical_detail` | Extra notes for engineers |
 | `files` | Evidence: `["path/to/file.py:42", ...]` |
+| `key` | Code-graph key of the thing this box stands for (set by the analyzer: a module id, file path, `file::function`, `c:file::Class`, `t:table`). Turns on *Explore from here*, WHY / TODO notes and docs in the panel |
 | `confidence` | `verified` (read in code) or `inferred` (drawn with a dashed border) |
 | `drilldown` | id of a view opened by the panel's **See inside** button (box gets a **+** badge) |
 | `module` | Module id: the panel offers **See inside <module>** (opens its facet bar) |
@@ -128,6 +129,7 @@ function's box in every call graph and above its control-flow view.
 | `style` | `solid` (default) · `dashed` (optional / background / loop-back) · `thick` (main path) · `both` (two-way) · `plain` (no arrowhead) |
 | `weight` | Number of links it stands for (module map) |
 | `files` | Evidence for the call |
+| `confidence` | `verified` (found in the code) or `inferred` (worked out by matching names or a rule; drawn dotted) |
 
 Define edges **in the order things happen**: the automatic walkthrough follows that order.
 
@@ -224,6 +226,24 @@ Written by `analyze_modules.py`; do not edit it. Useful fields when writing note
 `views[]` → the generated views (function ids are in each call-graph node's `function`; every generated
 view carries `"generated": true`, which limits validation to structural checks). Large code bases also
 get `area-<slug>` views: one module map per folder area, opened from the *Modules* view.
+
+Version 3 adds:
+- `graph`: the code graph the *Explore* tab queries, in a compact form: `types` and `rels` (name lists),
+  `modules`, `nodes` as `[type, key, label, module, line, group, extra?]` and `edges` as
+  `[from, to, relation, prov, line, section?]` (indexes into `nodes`; `prov` 0 = found in the code,
+  1 = inferred). Node types: module, file, function, class, table, doc, note. Relations: contains,
+  imports, calls, inherits, reads, writes, documents, explains (a WHY / TODO comment → code), defines,
+  renders. The same graph is written readably to `.codeflow/graph.json` (node-link format, as Graphify).
+- `insights`: `gods` (most-connected code), `surprising` (rare links between groups, with `why` and
+  evidence), `questions` (suggested questions with the Explore query that answers them: `op` one of
+  callers · callees · neighbours · impact · path, `from`, `to`; `to` may be `type:table`), `groups`
+  (group number → label).
+- `args`, `cwd`: how the analysis was run (used by `scripts/hook.py`).
+- Views `groups` (kind `communities`, one box per group) with a `group-N` detail view each, and
+  `insights` (kind `insights`).
+
+A spec may add or override views of any kind, but cannot change the graph; describe what you learned in
+module and function notes instead.
 
 ## Validation the builder performs
 

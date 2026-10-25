@@ -37,6 +37,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import scan_repo as SR  # noqa: E402  (shared walk / patterns)
+import codegraph as CG  # noqa: E402  (graph, cache, communities, docs, Graphify interop)
 
 JS_EXT = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte"}
 PY_EXT = {".py", ".ipynb"}
@@ -929,6 +930,18 @@ class Analysis:
         self.files, self.tests = collect_files(root, args.path, args.include_tests)
         self.text, self.facts, self.generated = {}, {}, set()
         self.node_note = ""
+        self.import_prov = {}
+        native = JS_EXT | PY_EXT | {".sql", ".prisma"}
+        self.gfy = None
+        gpath = None if args.no_graphify else CG.find_graphify(root, args.graphify)
+        if gpath:
+            self.gfy = CG.load_graphify(gpath, root, native)
+            if self.gfy:
+                extra = [r for r in self.gfy["files"] if r not in set(self.files) and (not args.path or r.startswith(args.path.rstrip("/") + "/"))]
+                self.files = sorted(self.files + extra)
+        out_dir = Path(args.out).parent if args.out else root / ".codeflow"
+        self.cache = CG.FactCache(out_dir / "cache" / "facts.json.gz",
+                                  {"cfg": not args.no_cfg, "js": not args.no_js, "max_cfg": MAX_CFG_NODES}, enabled=not args.no_cache)
 
     # ------------------------------------------------------------------ load + parse
     def load(self):
@@ -939,6 +952,13 @@ class Analysis:
         js = []
         for r in self.files:
             ext = Path(r).suffix.lower()
+            if self.gfy and r in self.gfy["files"]:
+                self.facts[r] = self.gfy["files"][r]
+                continue
+            cached = self.cache.get(r, self.text[r])
+            if cached is not None and (ext in PY_EXT or ext in JS_EXT):
+                self.facts[r] = cached
+                continue
             if ext in PY_EXT:
                 src = notebook_code(self.root / r) if ext == ".ipynb" else self.text[r]
                 f = py_facts(r, src, want_cfg and r not in self.generated)
@@ -947,14 +967,16 @@ class Analysis:
                 f.setdefault("functions", [])
                 f["lang"] = "python"
                 self.facts[r] = f
+                self.cache.put(r, self.text[r], f)
             elif ext in (".sql", ".prisma"):
                 self.facts[r] = {"lang": "sql", "imports": [], "classes": [], "functions": [],
                                  "loc": sum(1 for l in self.text[r].split("\n") if l.strip()),
                                  "tables": parse_prisma(self.text[r]) if ext == ".prisma" else parse_sql_tables(self.text[r])}
             elif ext in JS_EXT:
                 js.append(r)
+        js_all = [r for r in self.files if Path(r).suffix.lower() in JS_EXT and not (self.gfy and r in self.gfy["files"])]
         node, major = find_node(self.args.node) if not self.args.no_js else (None, None)
-        if js and not node:
+        if js_all and not node:
             self.node_note = ("Node.js 14+ was not found" if major is None else "Node.js %s is too old (14+ needed)" % major) + \
                 ": JavaScript/TypeScript files were scanned for imports only (no functions, calls or control flow)."
         jf = js_facts(self.root, js, node, want_cfg) if node else {}
@@ -967,6 +989,8 @@ class Analysis:
                 f = f2
             f["lang"] = "ts" if Path(r).suffix.lower() in (".ts", ".tsx", ".mts", ".cts") else "js"
             self.facts[r] = f
+            if not f.get("regex_only"):
+                self.cache.put(r, self.text[r], f)
         # test files: imports only
         self.test_facts = {}
         for r in self.tests:
@@ -1003,6 +1027,13 @@ class Analysis:
                             continue
                         self.symbols[r][local] = (tf, sym)
                         self.dep_names[(r, tf)].add(sym or local)
+            elif f.get("gfy"):
+                for imp in f.get("imports", []):
+                    tf = imp.get("file")
+                    if tf in self.facts and tf != r:
+                        self.file_deps[r][tf] += 1
+                        if imp.get("prov") == "I":
+                            self.import_prov[(r, tf)] = "I"
             elif f["lang"] in ("js", "ts"):
                 for imp in f.get("imports", []) + [dict(x, names=[{"imported": n, "local": ""} for n in x["names"]]) for x in f.get("reexports", [])]:
                     tf = R.js_import(r, imp["source"])
@@ -1191,10 +1222,21 @@ class Analysis:
         return None
 
     def resolve_calls(self):
+        uniq = defaultdict(list)   # name -> definitions, for the inferred fallback
+        for k, f in self.fns.items():
+            if f["file"] not in self.generated:
+                uniq[f["name"]].append(k)
         for key, fn in self.fns.items():
             r = fn["file"]
             syms = self.symbols.get(r, {})
             res = []
+            if fn.get("gfy_calls"):
+                for c in fn["gfy_calls"]:
+                    tk = c["to_file"] + "::" + c["to_qual"]
+                    if tk in self.fns and tk != key:
+                        res.append({"line": c.get("line", 0), "to": tk, "name": c["to_qual"].split(".")[-1], "prov": c.get("prov", "E")})
+                fn["resolved"] = sorted(res, key=lambda x: x["line"])
+                continue
             for c in fn.get("calls", []):
                 tgt, obj, name = None, c.get("obj"), c["name"]
                 if not obj:
@@ -1218,8 +1260,12 @@ class Analysis:
                         tgt = self._method(r, obj, name)
                 if tgt and tgt.startswith("class:"):
                     tgt = None
+                prov = "E"
+                if not tgt and obj and obj not in ("self", "this", "cls") and len(name) >= 4 and name not in CG.COMMON_CALLS \
+                        and not name.startswith("__") and len(uniq.get(name, ())) == 1:
+                    tgt, prov = uniq[name][0], "I"   # only one definition with this name anywhere: inferred link
                 if tgt and tgt != key and tgt in self.fns:
-                    res.append({"line": c.get("line", 0), "to": tgt, "name": name})
+                    res.append({"line": c.get("line", 0), "to": tgt, "name": name, "prov": prov})
                 else:
                     kind = None
                     if (obj and "(" not in obj and DB_OBJ.match(obj.split(".")[0]) and (name in DB_READ or name in DB_WRITE)) or name in ("read_sql", "to_sql"):
@@ -1473,6 +1519,34 @@ class Analysis:
             return c["table"]
         return c["name"].lower()
 
+    def fn_title(self, fn):
+        if fn.get("route"):
+            return fn["route"]["method"] + " " + (fn["route"]["path"] or "/")
+        if fn.get("cls") and (fn["name"] == "__init__" or (fn["name"] == "constructor" and not fn["file"].endswith((".py", ".ipynb")))):
+            return "new %s()" % fn["cls"]
+        return (fn["qual"].split(".")[-1] if fn.get("cls") else fn["qual"]) + "()"
+
+    # ------------------------------------------------------------------ v3: graph, notes, docs, communities, insights
+    def graph_facts(self):
+        a = self.args
+        self.notes = {}
+        for r in self.files:
+            if r in self.generated or not self.text.get(r):
+                continue
+            n = CG.scan_rationale(self.text[r], redact)
+            if n:
+                self.notes[r] = n
+        if self.gfy:
+            for r, ns in self.gfy.get("notes", {}).items():
+                self.notes.setdefault(r, []).extend(ns)
+        self.docs = [] if a.no_docs else CG.scan_docs(self.root, SR.walk(self.root, a.path), self)
+        self.graph, self.note_count = CG.build_graph(self, self.docs, self.notes, redact)
+        self.comm, self.comm_alone = CG.communities_of(self, self.graph, a.resolution)
+        self.comm_labels, self.comm_members = CG.community_labels(self, self.comm, self.graph, self.comm_alone)
+        self.gods = CG.most_connected(self, self.graph)
+        self.surprising = CG.surprising_links(self, self.graph, self.comm, self.comm_labels)
+        self.questions = CG.suggested_questions(self, self.graph, self.gods, self.surprising)
+
     def run(self):
         self.load()
         self.resolve_imports()
@@ -1481,6 +1555,8 @@ class Analysis:
         self.resolve_calls()
         self.git_facts()
         self.measure()
+        self.graph_facts()
+        self.cache.save(self.files)
         return self
 
 
@@ -1857,7 +1933,7 @@ class Views:
         groups = [{"id": sgid[x], "label": x + "/", "technical": base + x} for x in subs] if len(subs) >= 1 and len(fs) > 4 else []
         nodes = []
         for r in fs:
-            n = {"id": fid[r], "label": Path(r).name, "technical": r, "kind": self.file_kind(r), "description": self.file_desc(r),
+            n = {"id": fid[r], "label": Path(r).name, "technical": r, "key": r, "kind": self.file_kind(r), "description": self.file_desc(r),
                  "files": [self.ev(r)], "confidence": "verified",
                  "heat": max([fn["heat"] for fn in A.facts[r].get("functions", []) if "heat" in fn] or [0]),
                  "changed": r in A.changed_files}
@@ -1991,7 +2067,7 @@ class Views:
                 meths.append(("-" if m.get("access") == "private" else "+") + m["name"] + "(" + prm + ")" + (" " + m["returns"] if m.get("returns") else ""))
             mfns = [A.fns.get(c["file"] + "::" + c["name"] + "." + m["name"]) for m in c.get("methods", [])]
             heat = max([x["heat"] for x in mfns if x] or [0])
-            item = {"id": key(c), "label": disp(c), "technical": "%s (%s:%d)" % (c["name"], c["file"], c["line"]),
+            item = {"id": key(c), "key": "c:" + key(c), "label": disp(c), "technical": "%s (%s:%d)" % (c["name"], c["file"], c["line"]),
                     "stereotype": stereo, "attributes": attrs, "methods": meths,
                     "kind": "store" if stereo == "table" else "file" if stereo in ("schema", "interface") else "process",
                     "files": [self.ev(c["file"], c["line"])], "heat": heat, "confidence": "verified",
@@ -2019,6 +2095,12 @@ class Views:
             return None
         mine = {fn["key"] for fn in fns}
         inner = [(fn["key"], c["to"]) for fn in fns for c in fn["resolved"] if c.get("to") in mine]
+        prov = {}
+        for fn in fns:
+            for c in fn["resolved"]:
+                if c.get("to"):
+                    k = (fn["key"], c["to"])
+                    prov[k] = "E" if c.get("prov", "E") == "E" or prov.get(k) == "E" else "I"
         outer = [(fn["key"], c["to"]) for fn in fns for c in fn["resolved"] if c.get("to") and c["to"] not in mine]
         incoming = [(k, t) for t in mine for k in A.callers.get(t, ()) if k not in mine]
         deg = Counter()
@@ -2068,7 +2150,9 @@ class Views:
             if a in kk and b in kk and (a, b) not in seen and a != b:
                 seen.add((a, b))
                 cname = A.fns[b]["qual"].split(".")[-1]
-                edges.append({"from": kk[a], "to": kk[b], "label": "", "technical": cname + "()", "description": "%s calls %s." % (A.fns[a]["qual"], A.fns[b]["qual"])})
+                edges.append({"from": kk[a], "to": kk[b], "label": "", "technical": cname + "()", "description": "%s calls %s.%s" % (
+                    A.fns[a]["qual"], A.fns[b]["qual"], " Inferred: the name matches only one function in the code, but the link is not confirmed by an import." if prov.get((a, b)) == "I" else ""),
+                    "confidence": "inferred" if prov.get((a, b)) == "I" else "verified"})
         om, on = Counter(), defaultdict(set)
         for a, b in outer:
             if a in kk:
@@ -2383,7 +2467,7 @@ class Views:
         for t in mine:
             t = add_bases(t)
             attrs = attrs_of(t)
-            ents.append({"id": ent_id(t), "label": A.table_name(t), "technical": "%s (%s:%d)" % (t["name"], t["file"], t["line"]), "attributes": attrs,
+            ents.append({"id": ent_id(t), "key": "t:" + A.table_name(t).lower(), "label": A.table_name(t), "technical": "%s (%s:%d)" % (t["name"], t["file"], t["line"]), "attributes": attrs,
                          "files": [self.ev(t["file"], t["line"])], "confidence": "verified",
                          "description": "Table %s, defined in %s. %d field%s%s." % (A.table_name(t), t["file"], len(attrs), "" if len(attrs) == 1 else "s",
                                                                                  "; holds personal-looking fields: " + ", ".join(a["name"] for a in attrs if a["sensitive"]) if any(a["sensitive"] for a in attrs) else ""),
@@ -2437,10 +2521,193 @@ class Views:
                 "summary": "Parts changed since %s (orange outline) and the parts that use them and may be affected (dashed)." % A.args.diff,
                 "technical_summary": "git diff %s: %d changed files in %d modules; %d dependent modules." % (A.args.diff, len(A.changed_files), len(changed), len(impact))}
 
+    # ------------------------------------------------------------------ v3: groups (communities)
+    def _file_links(self):
+        """Directed file-to-file link weights from the graph (imports, calls, inheritance) with provenance."""
+        if hasattr(self, "_fl"):
+            return self._fl
+        g = self.A.graph
+        owner = {}
+        for i, n in enumerate(g.nodes):
+            if n["type"] == "file":
+                owner[i] = n["key"]
+            elif n["type"] in ("function", "class"):
+                owner[i] = (n["key"][2:] if n["key"].startswith("c:") else n["key"]).split("::")[0]
+        w, inferred_only = Counter(), defaultdict(lambda: True)
+        for a, b, rel, prov, _l, _n in g.edges:
+            if rel not in ("imports", "calls", "inherits", "renders"):
+                continue
+            fa, fb = owner.get(a), owner.get(b)
+            if not fa or not fb or fa == fb:
+                continue
+            w[(fa, fb)] += 1
+            if prov != "I":
+                inferred_only[(fa, fb)] = False
+        self._fl = (w, inferred_only)
+        return self._fl
+
+    def communities_views(self):
+        A = self.A
+        if not A.comm or len(set(A.comm.values())) < 2:
+            return []
+        w, inf_only = self._file_links()
+        members = A.comm_members
+        order = sorted(members, key=lambda c: (c == A.comm_alone, -len(members[c]), c))
+        shown = order[:40]
+        cid = lambda c: "grp-%d" % c
+        nodes, views = [], []
+        for c in shown:
+            fs = sorted(members[c])
+            folders = sorted({A.mod_of[r] for r in fs})
+            inside = sum(x for (a, b), x in w.items() if A.comm.get(a) == c and A.comm.get(b) == c)
+            outside = sum(x for (a, b), x in w.items() if (A.comm.get(a) == c) != (A.comm.get(b) == c) and c in (A.comm.get(a), A.comm.get(b)))
+            fns = [fn for fn in A.fns.values() if fn["file"] in set(fs)]
+            alone = c == A.comm_alone
+            n = {"id": cid(c), "label": A.comm_labels[c], "technical": "%d files in %d folder module%s" % (len(fs), len(folders), "" if len(folders) == 1 else "s"),
+                 "kind": "package" if alone else "module", "confidence": "inferred",
+                 "description": ("Files that are not linked to any other file by imports or calls." if alone else
+                                 "%d files that work closely together, found from how they import and call each other (not from folders). "
+                                 "Spans %s." % (len(fs), ", ".join(A.modules[m]["label"] for m in folders[:5]) + (" and more" if len(folders) > 5 else ""))),
+                 "data": [r.rsplit("/", 1)[-1] for r in fs][:14],
+                 "metrics": {"Files": len(fs), "Functions": len(fns), "Folder modules spanned": len(folders),
+                             "Links inside the group": inside, "Links to other groups": outside},
+                 "heat": max([fn.get("heat", 0) for fn in fns] or [0]), "drilldown": "group-%d" % c}
+            nodes.append(n)
+            views.append(self.community_view(c, w, inf_only))
+        cw, cinf = Counter(), defaultdict(lambda: True)
+        for (a, b), x in w.items():
+            ca, cb = A.comm.get(a), A.comm.get(b)
+            if ca is None or cb is None or ca == cb or ca not in shown or cb not in shown:
+                continue
+            cw[(ca, cb)] += x
+            if not inf_only[(a, b)]:
+                cinf[(ca, cb)] = False
+        weights = sorted(cw.values())
+        thick = weights[int(len(weights) * 0.8)] if len(weights) >= 5 else 10 ** 9
+        edges = [{"from": cid(a), "to": cid(b), "label": "uses", "technical": "%d link%s" % (x, "" if x == 1 else "s"), "weight": x,
+                  "style": "thick" if x >= thick and x > 2 else "solid", "confidence": "inferred" if cinf[(a, b)] else "verified",
+                  "description": "Files in '%s' import or call files in '%s' (%d link%s)." % (A.comm_labels[a], A.comm_labels[b], x, "" if x == 1 else "s")}
+                 for (a, b), x in sorted(cw.items())]
+        top = {"id": "groups", "title": "Groups", "kind": "communities", "type": "flowchart", "direction": "LR", "nodes": nodes, "edges": edges,
+               "summary": "The code grouped by how it actually works together (which files import and call each other), regardless of folders. Click a group, then See inside.",
+               "technical_summary": "Louvain communities on the file graph (imports, calls, inheritance; resolution %.1f): %d groups%s." % (
+                   A.args.resolution, len(members), ", top 40 shown" if len(members) > 40 else "")}
+        if len(edges) > 18:
+            top["edge_labels"] = False
+        return [top] + views
+
+    def community_view(self, c, w, inf_only):
+        A = self.A
+        fs = sorted(A.comm_members[c])
+        if len(fs) > 40:
+            deg = Counter()
+            for (a, b), x in w.items():
+                if a in fs or b in fs:
+                    deg[a] += x
+                    deg[b] += x
+            fs = sorted(fs, key=lambda r: -deg[r])[:40]
+        fset = set(fs)
+        mods = sorted({A.mod_of[r] for r in fs})
+        groups = [{"id": "gm%d" % i, "label": A.modules[m]["label"], "technical": A.modules[m]["path"]} for i, m in enumerate(mods)]
+        gm = {m: "gm%d" % i for i, m in enumerate(mods)}
+        nodes = [{"id": "f%d" % i, "label": r.rsplit("/", 1)[-1], "technical": r, "kind": self.file_kind(r), "key": r, "group": gm[A.mod_of[r]],
+                  "module": A.mod_of[r], "description": self.file_desc(r), "files": [self.ev(r)], "confidence": "verified",
+                  "heat": max([fn.get("heat", 0) for fn in A.facts[r].get("functions", []) if "heat" in fn] or [0])} for i, r in enumerate(fs)]
+        fid = {r: "f%d" % i for i, r in enumerate(fs)}
+        edges = [{"from": fid[a], "to": fid[b], "label": "", "technical": "%d link%s" % (x, "" if x == 1 else "s"),
+                  "confidence": "inferred" if inf_only[(a, b)] else "verified"}
+                 for (a, b), x in sorted(w.items()) if a in fset and b in fset]
+        nb = Counter()
+        for (a, b), x in w.items():
+            if a in fset and b not in fset and A.comm.get(b) is not None:
+                nb[("out", A.comm[b])] += x
+            elif b in fset and a not in fset and A.comm.get(a) is not None:
+                nb[("in", A.comm[a])] += x
+        others = sorted({o for _, o in nb}, key=lambda o: -sum(x for (d, oo), x in nb.items() if oo == o))[:8]
+        if others:
+            groups.append({"id": "og", "label": "Other groups"})
+        for o in others:
+            nodes.append({"id": "g%d" % o, "label": A.comm_labels[o], "technical": "%d files" % len(A.comm_members[o]), "kind": "module",
+                          "group": "og", "drilldown": "group-%d" % o, "confidence": "inferred", "description": "Another group of files."})
+        for (d, o), x in sorted(nb.items()):
+            if o in others:
+                # aggregate to the busiest file on our side
+                side = [(a if d == "out" else b) for (a, b), xx in w.items() if ((a in fset and A.comm.get(b) == o) if d == "out" else (b in fset and A.comm.get(a) == o))]
+                f = Counter(side).most_common(1)[0][0]
+                e = {"from": fid[f], "to": "g%d" % o} if d == "out" else {"from": "g%d" % o, "to": fid[f]}
+                e.update({"label": "", "technical": "%d link%s" % (x, "" if x == 1 else "s"), "style": "dashed"})
+                edges.append(e)
+        v = {"id": "group-%d" % c, "title": A.comm_labels[c], "kind": "detail", "type": "flowchart", "direction": "LR", "groups": groups,
+             "nodes": nodes, "edges": edges,
+             "summary": "The files in this group and how they link. Boxes are grouped by folder module; click a file, then See inside its module.",
+             "technical_summary": "Community %d: %d files across %d folder modules." % (c, len(A.comm_members[c]), len(mods))}
+        if len(edges) > 24:
+            v["edge_labels"] = False
+        return v
+
+    # ------------------------------------------------------------------ v3: insights
+    def insights_view(self):
+        A = self.A
+        g = A.graph
+        nodes, edges, ids = [], [], {}
+
+        def node(key, group):
+            if key in ids:
+                return ids[key]
+            gi = g.idx.get(key)
+            if gi is None:
+                return None
+            n = g.nodes[gi]
+            ids[key] = "i%d" % len(ids)
+            f = (key[2:] if key.startswith("c:") else key).split("::")[0]
+            item = {"id": ids[key], "label": n["label"], "technical": key[2:] if key.startswith("c:") else key, "key": key,
+                    "kind": {"function": "function", "class": "process", "file": "file", "table": "store", "module": "module"}.get(n["type"], "process"),
+                    "group": group, "confidence": "verified", "files": [self.ev(f, n["line"])] if f in A.mod_of else []}
+            if n["type"] == "function":
+                item["function"] = key
+            if f in A.mod_of:
+                item["module"] = A.mod_of[f]
+            nodes.append(item)
+            return ids[key]
+        for s in A.surprising:
+            a = node(s["from"], "sur")
+            b = node(s["to"], "sur")
+            if a and b:
+                edges.append({"from": a, "to": b, "label": "rare link", "technical": s["relation"], "description": s["why"],
+                              "files": [s["evidence"]], "confidence": "inferred" if s["prov"] == "I" else "verified"})
+        for gd in A.gods[:8]:
+            i = node(gd["key"], "god")
+            if i:
+                it = next(x for x in nodes if x["id"] == i)
+                it.setdefault("metrics", {})["Connections"] = gd["connections"]
+                it["description"] = "One of the most-connected pieces of code: %d other items call, import or inherit from it (or it does so to them). " \
+                                    "Changes here ripple widely." % gd["connections"]
+        if not nodes:
+            return None
+        groups = [x for x in [{"id": "sur", "label": "Surprising links", "description": "The only (or nearly only) tie between two otherwise separate groups of code."},
+                              {"id": "god", "label": "Most-connected", "description": "Code with the most links in or out."}]
+                  if any(n["group"] == x["id"] for n in nodes)]
+        walk = [{"text": "Insights found in the code graph, without any AI: rare links between otherwise separate parts, and the most-connected code."}]
+        for s in A.surprising[:4]:
+            if s["from"] in ids and s["to"] in ids:
+                walk.append({"edge": [ids[s["from"]], ids[s["to"]]], "text": s["why"] + " Evidence: " + s["evidence"] + "."})
+        for gd in A.gods[:3]:
+            if gd["key"] in ids:
+                walk.append({"target": ids[gd["key"]], "text": "%s has %d connections: changes there ripple widely." % (gd["label"], gd["connections"])})
+        walk.append({"text": "Open the Explore tab to ask questions about any of these, for example what could break if one of them changes."})
+        return {"id": "insights", "title": "Insights", "kind": "insights", "type": "flowchart", "direction": "LR", "groups": groups,
+                "nodes": nodes, "edges": edges, "walkthrough": walk,
+                "summary": "Surprising links between parts of the code that are otherwise separate, and the most-connected code. Good places to start a review.",
+                "technical_summary": "Cross-community edges with weight ≤ 2 between distant folders, ranked by folder distance; top nodes by degree over calls, imports and inheritance."}
+
     # ------------------------------------------------------------------ assemble
     def build(self):
         A = self.A
         self.views += self.modules_views()
+        self.views += self.communities_views()
+        iv = self.insights_view()
+        if iv:
+            self.views.append(iv)
         ch = self.changes_view()
         if ch:
             self.views.append(ch)
@@ -2537,11 +2804,45 @@ def summary_md(A, records, out_path, views):
         for r in records:
             if r["changed"]:
                 L.append("- %s: %s%s" % (r["label"], ", ".join(r["changed_files"][:6]), (" (functions: %s)" % ", ".join(r["changed_functions"][:8])) if r["changed_functions"] else ""))
+    if A.gods:
+        L += ["", "## Most-connected code", ""]
+        for gd in A.gods[:8]:
+            L.append("- `%s` (%s) - %d connections" % (gd["label"], gd["key"][2:] if gd["key"].startswith("c:") else gd["key"], gd["connections"]))
+    if A.comm and len(set(A.comm.values())) > 1:
+        L += ["", "## Groups that work together (across folders)", ""]
+        for c in sorted(A.comm_members, key=lambda c: (c == A.comm_alone, -len(A.comm_members[c])))[:10]:
+            fs = A.comm_members[c]
+            L.append("- **%s**: %d files in %d folder module(s)" % (A.comm_labels[c], len(fs), len({A.mod_of[r] for r in fs})))
+    if A.surprising:
+        L += ["", "## Surprising links", ""]
+        for x in A.surprising[:8]:
+            L.append("- %s → %s (%s, %s): %s" % (x["from_label"], x["to_label"], x["relation"], x["evidence"], x["why"]))
+    nn = sum(len(v) for v in A.notes.values())
+    if nn:
+        tags = Counter(n["tag"] for v in A.notes.values() for n in v)
+        L += ["", "## Notes in the code", "", "%d tagged comments: %s." % (nn, ", ".join("%s %d" % (t, c) for t, c in tags.most_common()))]
+    if A.docs:
+        L += ["", "## Documentation linked to code", ""]
+        for d in A.docs[:10]:
+            L.append("- `%s` (%s): %d link(s)" % (d["path"], d["kind"], len(d["links"])))
+    if A.questions:
+        L += ["", "## Suggested questions (run them in the map's Explore tab)", ""]
+        for q in A.questions:
+            L.append("- " + q["text"])
+    L += ["", "Cache: %d file(s) re-used, %d parsed. Graph: %d items, %d links (%d inferred)." % (
+        A.cache.hits, A.cache.misses, len(A.graph.nodes), len(A.graph.edges), sum(1 for e in A.graph.edges if e[3] == "I"))]
     sugg = sorted([r for r in records if r["kind"] != "package"], key=lambda r: -(r["heat"] + len(r["used_by"]) / 10.0 + len(r["routes"]) / 20.0))[:3]
     L += ["", "## Suggested modules to explore first", ""]
     for r in sugg:
         L.append("- **%s** (`%s`): %s" % (r["label"], r["id"], r["summary"]))
     return "\n".join(L) + "\n"
+
+
+def _rel_or_abs(p, root):
+    try:
+        return os.path.relpath(str(p), str(root))
+    except ValueError:   # another drive on Windows
+        return str(p)
 
 
 def main(argv=None):
@@ -2569,6 +2870,11 @@ def main(argv=None):
     ap.add_argument("--no-churn", action="store_true", help="do not read git history")
     ap.add_argument("--diff", default=None, help="mark what changed since this branch / commit (e.g. main, HEAD~5)")
     ap.add_argument("--report", default=None, help="also write the Markdown summary to this file")
+    ap.add_argument("--no-cache", action="store_true", help="parse every file again (ignore .codeflow/cache)")
+    ap.add_argument("--no-docs", action="store_true", help="do not link README / docs / ADR files to the code")
+    ap.add_argument("--graphify", default=None, help="Graphify graph.json to read (default: graphify-out/graph.json if present)")
+    ap.add_argument("--no-graphify", action="store_true", help="ignore any Graphify output")
+    ap.add_argument("--resolution", type=float, default=1.0, help="community size: above 1 gives more, smaller groups (default 1.0)")
     a = ap.parse_args(argv)
     root = Path(a.repo).resolve()
     if not root.is_dir():
@@ -2589,13 +2895,21 @@ def main(argv=None):
     out = Path(a.out) if a.out else root / ".codeflow" / "modules.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     notes = [n for n in [A.node_note] if n]
-    data = {"schema": "codeflow-modules/2", "tool": "codeflow-map analyze_modules.py 2.0",
+    data = {"schema": "codeflow-modules/3", "tool": "codeflow-map analyze_modules.py 3.0",
             "repo": {"name": root.name},
             "generated": {"date": datetime.date.today().isoformat(), "commit": A.commit, "scope": a.path or "whole repository",
                           "method": "Static analysis: Python ast, JavaScript/TypeScript via Babel parser, git history for change frequency.",
                           "notes": notes, "diff_base": a.diff},
-            "modules": records, "cycles": A.cycles, "selected": sorted(sel), "views": views, "start_view": "modules"}
-    out.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+            "modules": records, "cycles": A.cycles, "selected": sorted(sel), "views": views, "start_view": "modules",
+            "graph": CG.compact(A.graph, A.comm),
+            "insights": {"questions": A.questions, "gods": A.gods, "surprising": A.surprising,
+                         "groups": {str(c): A.comm_labels[c] for c in A.comm_labels}},
+            "args": [x for x in (argv if argv is not None else sys.argv[1:])], "cwd": os.getcwd()}
+    if A.gfy:
+        data["generated"]["notes"].append("Read Graphify output %s%s for %d file(s) in languages codeflow-map does not parse itself." % (
+            _rel_or_abs(A.gfy["path"], root), "" if A.gfy["version"] == "?" else " (graphify %s)" % A.gfy["version"], len(A.gfy["files"])))
+    out.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    (out.parent / "graph.json").write_text(json.dumps(CG.node_link(A.graph, A.comm, A), ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     md = summary_md(A, records, out, views)
     if a.report:
         Path(a.report).parent.mkdir(parents=True, exist_ok=True)

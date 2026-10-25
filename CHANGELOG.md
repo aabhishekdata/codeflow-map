@@ -1,5 +1,38 @@
 # Changelog
 
+## 3.0.0 (2026-10-25)
+
+Ideas from [Graphify](https://github.com/Graphify-Labs/graphify), implemented without any installs and
+answered in the browser.
+
+### Added
+- `scripts/codegraph.py`: one code graph of modules, files, functions, classes, tables, docs and
+  rationale comments (contains, imports, calls, inherits, reads, writes, documents, explains, defines,
+  renders). Saved in `modules.json` (`graph`) and as `.codeflow/graph.json` (node-link, Graphify-style).
+- Viewer **Explore** tab: callers, callees, everything around, impact (up to three steps, folded into
+  one box per module when large) and path (B may be any database table); suggested questions; "Explore
+  from here" and "What could break if it changes?" in every panel; deep links and Back between questions;
+  code-graph hits in search.
+- **Groups** tab: functional groups from a pure-Python Louvain; unlinked files collected in one group;
+  `--resolution`.
+- **Insights** tab and report: most-connected code, surprising links between groups, suggested questions.
+- Provenance on every arrow: found in the code or inferred (dotted). Unique-name call matching and
+  table reads / writes are marked inferred.
+- Rationale: WHY / NOTE / IMPORTANT / DECISION / SECURITY comments, known issues (TODO / FIXME / HACK / XXX / BUG /
+  WORKAROUND / DEPRECATED) and ADR / RFC references,
+  attached to the enclosing (or following) function, class or file; shown in the panel.
+- Docs: README, docs/ and ADR Markdown linked to the modules, files and functions they mention
+  (`--no-docs`).
+- File cache keyed by content hash (`.codeflow/cache/`, `--no-cache`).
+- `scripts/hook.py`: optional git post-commit hook (install / uninstall / status) that repeats the last
+  analysis and build in the background.
+- Graphify interop: `graphify-out/graph.json` (or `--graphify <file>`) supplies files in languages
+  codeflow-map does not parse; `--no-graphify`.
+
+### Changed
+- File names that say little on their own are shown with their folder (`conf/__init__.py`).
+- `modules.json` schema `codeflow-modules/3` (adds `graph`, `insights`, `args`, `cwd`); v2 files still build.
+
 ## 2.0.0 (2026-10-25)
 
 ### Added
