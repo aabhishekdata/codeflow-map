@@ -76,6 +76,20 @@ def redact(s):
     return SECRET_SHAPES.sub("•••", s)
 
 
+SECRET_WORD = re.compile(r"(?i)\b((?:[\w.-]*?)(?:password|passwd|pwd|passphrase|secret|api[_-]?key|access[_-]?key|token|"
+                         r"private[_-]?key|credential|conn(?:ection)?[_-]?str(?:ing)?|bearer|auth[_-]?key)[\w.-]*)"
+                         r"(\s*(?:[:=]+|\bis\b)\s*)([^\s,;)]+)")
+LONG_TOKEN = re.compile(r"\b(?=[A-Za-z0-9_\-]*\d)(?=[A-Za-z0-9_\-]*[A-Za-z])[A-Za-z0-9_\-]{24,}\b|\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{8,}")
+
+
+def redact_prose(s):
+    """redact() plus what comments and docs add: unquoted values after secret-looking words
+    ("password is hunter2", "api_key=abc") and long random-looking tokens."""
+    s = redact(str(s or ""))
+    s = SECRET_WORD.sub(lambda m: m.group(1) + m.group(2) + ("•••" if m.group(3) != "•••" else m.group(3)), s)
+    return LONG_TOKEN.sub("•••", s)
+
+
 def oneline(s, n):
     s = re.sub(r"\s+", " ", str(s or "")).strip()
     return s if len(s) <= n else s[:n - 1] + "…"
@@ -935,7 +949,8 @@ class Analysis:
         self.gfy = None
         gpath = None if args.no_graphify else CG.find_graphify(root, args.graphify)
         if gpath:
-            self.gfy = CG.load_graphify(gpath, root, native)
+            walked = {SR.rel(p, root) for p in SR.walk(root, args.path)}   # same skip rules as everything else (.env, hidden, vendor)
+            self.gfy = CG.load_graphify(gpath, root, native, walked)
             if self.gfy:
                 extra = [r for r in self.gfy["files"] if r not in set(self.files) and (not args.path or r.startswith(args.path.rstrip("/") + "/"))]
                 self.files = sorted(self.files + extra)
@@ -991,6 +1006,7 @@ class Analysis:
             self.facts[r] = f
             if not f.get("regex_only"):
                 self.cache.put(r, self.text[r], f)
+        self.facts = {r: self.facts[r] for r in sorted(self.facts)}   # same order with or without the cache
         # test files: imports only
         self.test_facts = {}
         for r in self.tests:
@@ -1533,13 +1549,19 @@ class Analysis:
         for r in self.files:
             if r in self.generated or not self.text.get(r):
                 continue
-            n = CG.scan_rationale(self.text[r], redact)
+            n = CG.scan_rationale(self.text[r], redact_prose)
             if n:
                 self.notes[r] = n
         if self.gfy:
             for r, ns in self.gfy.get("notes", {}).items():
+                for n in ns:
+                    n["text"] = redact_prose(n["text"])
                 self.notes.setdefault(r, []).extend(ns)
         self.docs = [] if a.no_docs else CG.scan_docs(self.root, SR.walk(self.root, a.path), self)
+        for d in self.docs:   # headings are copied into the map
+            d["title"] = redact_prose(d["title"])
+            for l in d["links"]:
+                l["section"] = redact_prose(l["section"])
         self.graph, self.note_count = CG.build_graph(self, self.docs, self.notes, redact)
         self.comm, self.comm_alone = CG.communities_of(self, self.graph, a.resolution)
         self.comm_labels, self.comm_members = CG.community_labels(self, self.comm, self.graph, self.comm_alone)
@@ -2838,19 +2860,7 @@ def summary_md(A, records, out_path, views):
     return "\n".join(L) + "\n"
 
 
-def _rel_or_abs(p, root):
-    try:
-        return os.path.relpath(str(p), str(root))
-    except ValueError:   # another drive on Windows
-        return str(p)
-
-
-def main(argv=None):
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(errors="replace")
-        except (AttributeError, ValueError):
-            pass
+def make_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("repo", nargs="?", default=".")
     ap.add_argument("--out", default=None, help="output JSON (default <repo>/.codeflow/modules.json)")
@@ -2875,6 +2885,23 @@ def main(argv=None):
     ap.add_argument("--graphify", default=None, help="Graphify graph.json to read (default: graphify-out/graph.json if present)")
     ap.add_argument("--no-graphify", action="store_true", help="ignore any Graphify output")
     ap.add_argument("--resolution", type=float, default=1.0, help="community size: above 1 gives more, smaller groups (default 1.0)")
+    return ap
+
+
+def _rel_or_abs(p, root):
+    try:
+        return os.path.relpath(str(p), str(root))
+    except ValueError:   # another drive on Windows
+        return str(p)
+
+
+def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+    ap = make_parser()
     a = ap.parse_args(argv)
     root = Path(a.repo).resolve()
     if not root.is_dir():

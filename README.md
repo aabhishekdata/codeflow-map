@@ -28,7 +28,7 @@ installing and every question is answered inside the HTML:
 | Evidence on arrows | verified / inferred boxes | every arrow marked **found in the code** (solid) or **inferred** (dotted, e.g. matched by a unique name) |
 | The authors' reasons | - | WHY / NOTE / HACK / TODO / FIXME comments and ADR / RFC references attached to the code they explain |
 | Docs | - | README / docs / ADR files linked to the modules, files and functions they mention |
-| Re-runs | full | file cache keyed by content hash: unchanged files are not re-read; optional git hook (`scripts/hook.py`) rebuilds after each commit |
+| Re-runs | full | file cache keyed by content hash: unchanged files are not parsed again; optional git hook (`scripts/hook.py`) rebuilds after each commit |
 | Other languages | Python, JS/TS, SQL, Prisma | + anything in a Graphify `graphify-out/graph.json` (Go, Java, Rust, ...) if the repo has one |
 | Export | - | `.codeflow/graph.json` in the node-link format Graphify uses |
 

@@ -54,7 +54,7 @@ class FactCache:
         hit = self.data.get(rel)
         if hit and hit.get("h") == self.digest(text):
             self.hits += 1
-            return hit["f"]
+            return json.loads(json.dumps(hit["f"]))   # a fresh copy: the analysis adds per-run results to it
         self.misses += 1
         return None
 
@@ -256,24 +256,41 @@ def find_graphify(root, explicit=None):
     return None
 
 
-def load_graphify(gpath, root, native_ext):
+def load_graphify(gpath, root, native_ext, allowed=None):
     """Read Graphify's graph.json (NetworkX node-link) and turn it into codeflow facts for files whose language
     codeflow-map does not parse itself. Returns {"files": {rel: facts}, "notes": {rel: [...]}, "version": str}."""
     try:
         data = json.loads(Path(gpath).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    nodes = {n.get("id"): n for n in data.get("nodes", []) if isinstance(n, dict) and n.get("id") is not None}
-    links = [l for l in (data.get("links") or data.get("edges") or []) if isinstance(l, dict)]
+    if not isinstance(data, dict):
+        return None
+
+    def ok_id(x):
+        return isinstance(x, (str, int)) and not isinstance(x, bool)
+    nodes = {n["id"]: n for n in (data.get("nodes") if isinstance(data.get("nodes"), list) else [])
+             if isinstance(n, dict) and ok_id(n.get("id"))}
+    raw_links = data.get("links") or data.get("edges") or []
+    links = [l for l in (raw_links if isinstance(raw_links, list) else [])
+             if isinstance(l, dict) and ok_id(l.get("source")) and ok_id(l.get("target"))]
 
     def rel_of(sf):
-        if not sf:
+        """Repository-relative path of a source file, or None. Only files the normal repository walk would
+        include are accepted (never outside the repository, never .env or skipped folders)."""
+        if not sf or not isinstance(sf, str):
             return None
-        sf = str(sf).replace("\\", "/").lstrip("./")
-        parts = sf.split("/")
+        sf = sf.replace("\\", "/")
+        while sf.startswith("./"):
+            sf = sf[2:]
+        parts = [x for x in sf.split("/") if x]
+        if not parts or ".." in parts:
+            return None
         for i in range(len(parts)):   # graph built from a parent folder: strip leading parts until the file exists
             cand = "/".join(parts[i:])
-            if (root / cand).is_file():
+            if allowed is not None:
+                if cand in allowed:
+                    return cand
+            elif not sf.startswith("/") and (root / cand).is_file():
                 return cand
         return None
 
@@ -285,6 +302,7 @@ def load_graphify(gpath, root, native_ext):
     rel_cache = {}
     for nid, n in nodes.items():
         sf = n.get("source_file")
+        sf = sf if isinstance(sf, str) else None
         if sf not in rel_cache:
             rel_cache[sf] = rel_of(sf)
         n["_rel"] = rel_cache[sf]
@@ -356,7 +374,7 @@ def load_graphify(gpath, root, native_ext):
         elif rel == "rationale_for":
             sn, tn = nodes.get(s), nodes.get(t)
             if sn and tn and tn.get("_rel") and Path(tn["_rel"]).suffix.lower() not in native_ext:
-                notes[tn["_rel"]].append({"line": line_of(sn), "tag": "NOTE", "text": str(sn.get("label", ""))[:220], "refs": []})
+                notes[tn["_rel"]].append({"line": line_of(sn), "tag": "NOTE", "text": re.sub(r"\s+", " ", str(sn.get("label", "")))[:220], "refs": []})
     for r, f in out.items():
         try:
             text = (root / r).read_text(encoding="utf-8-sig", errors="ignore")
@@ -529,7 +547,7 @@ def build_graph(A, docs, notes_by_file, redact=None):
             if fn["file"] in A.generated:
                 continue
             names = set(fn.get("names", [])) | {c["name"] for c in fn.get("calls", [])} | {(c.get("obj") or "").split(".")[-1] for c in fn.get("calls", [])}
-            touched = [table_cls[n] for n in names if n in table_cls]
+            touched = sorted({table_cls[n] for n in names if n in table_cls})
             if not touched:
                 continue
             dbw = any(c.get("ext") == "db" and c.get("write") for c in fn.get("resolved", []))

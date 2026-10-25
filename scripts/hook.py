@@ -57,7 +57,12 @@ def strip_block(text):
 def repo_of(modules):
     data = json.loads(Path(modules).read_text(encoding="utf-8"))
     args, cwd = data.get("args") or [], data.get("cwd") or str(Path(modules).resolve().parent.parent)
-    path = next((a for a in args if not a.startswith("-")), ".")   # first positional = repository
+    sys.path.insert(0, str(HERE))
+    import analyze_modules   # only for its argument parser
+    try:
+        path = analyze_modules.make_parser().parse_args(args).repo
+    except SystemExit:
+        path = "."
     return Path(cwd, path).resolve(), data
 
 

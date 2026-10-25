@@ -980,7 +980,8 @@ const App = (() => {
   }
   function runExplore(op, from, to, fromLink){
     if (!GT.N) return toast('This map has no code graph (re-run analyze_modules.py).');
-    op = op || 'neighbours';
+    op = ['callers', 'callees', 'neighbours', 'impact', 'path'].includes(op) ? op : 'neighbours';
+    from = String(from || ''); to = to == null ? to : String(to);
     S.xq = { op, from, to: op === 'path' ? to : undefined };
     S.views.explore = exploreView(op, from, to);
     $('xOp').value = op; setInput('xFrom', from); setInput('xTo', op === 'path' ? to : '');

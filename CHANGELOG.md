@@ -28,6 +28,9 @@ answered in the browser.
   analysis and build in the background.
 - Graphify interop: `graphify-out/graph.json` (or `--graphify <file>`) supplies files in languages
   codeflow-map does not parse; `--no-graphify`.
+- Privacy: comment text, doc headings and Graphify labels are redacted before they reach the map
+  (values after secret-looking words, known key shapes, long random tokens). A Graphify graph can only
+  point at files the normal repository walk includes (never outside the repository, never `.env`).
 
 ### Changed
 - File names that say little on their own are shown with their folder (`conf/__init__.py`).

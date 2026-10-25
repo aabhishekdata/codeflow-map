@@ -96,7 +96,7 @@ suggestions, ask which module(s) to explore, and wait.**
 | `--no-docs` | Do not link README / docs / ADR files to the code |
 | `--graphify <graph.json>` / `--no-graphify` | Use (or ignore) a Graphify graph; by default `graphify-out/graph.json` is read if present |
 | `--resolution 1.0` | Larger → more, smaller groups in the *Groups* tab |
-| `--no-cache` | Re-read every file (normally unchanged files come from `.codeflow/cache/`) |
+| `--no-cache` | Parse every file again (normally facts of unchanged files come from `.codeflow/cache/`) |
 
 The summary also lists the most-connected code, the groups, surprising links, WHY / TODO notes found,
 docs linked to code and *Suggested questions* (they become one-click questions in the *Explore* tab).
@@ -104,7 +104,7 @@ docs linked to code and *Suggested questions* (they become one-click questions i
 Besides `modules.json` the analyzer writes `.codeflow/graph.json` (the code graph in the node-link format
 Graphify uses, for other tools) and `.codeflow/cache/` (facts per file, keyed by content hash). Add
 `.codeflow/` to `.gitignore` if the user does not want it committed. Re-running is cheap (unchanged files
-come from the cache) and replaces `modules.json`; never edit that file by hand.
+are not parsed again) and replaces `modules.json`; never edit that file by hand.
 
 **Other languages.** codeflow-map parses Python, JavaScript / TypeScript, SQL and Prisma itself. If the
 repository has a Graphify output (`graphify-out/graph.json`, made by the user with the separate Graphify
@@ -218,13 +218,15 @@ views when the picture matters.
   into the spec. Describe fields by name ("email address", "policy number"). The builder blocks obvious
   secrets and warns on anything that looks like personal data.
 - Environment variables: names only, never values. Do not open `.env` files.
+- WHY / TODO comments and doc headings are copied into the map with secret-looking values replaced by
+  •••. Still skim the *Known issues* and *Documentation* panels before sharing a map outside the team.
 - Findings are facts with evidence, worded neutrally ("claim details are sent to an outside AI service; the
   response is not stored"). Flag, do not hide, risky findings.
 
 ## Updating a map
 
 Re-run `analyze_modules.py` (and `scan_repo.py` if you use it), edit the existing spec rather than
-starting over, update `generated.date` / `commit`, rebuild. Only changed files are re-read.
+starting over, update `generated.date` / `commit`, rebuild. Only changed files are parsed again.
 
 To keep a map fresh automatically, offer (do not install unasked) the optional git hook:
 `python <skill>/scripts/hook.py install --modules .codeflow/modules.json`. After each commit it repeats
