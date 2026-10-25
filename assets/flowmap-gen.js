@@ -71,7 +71,7 @@
   // ---------------------------------------------------------------- flowchart
   function genFlowchart(v, o) {
     var nodes = v.nodes || [], edges = v.edges || [], groups = v.groups || [];
-    var idMap = {}, rev = {}, gMap = {}, gRev = {};
+    var idMap = Object.create(null), rev = Object.create(null), gMap = Object.create(null), gRev = Object.create(null);
     nodes.forEach(function (n, i) { idMap[n.id] = 'n' + i; rev['n' + i] = n.id; });
     groups.forEach(function (g, i) { gMap[g.id] = 'g' + i; gRev['g' + i] = g.id; });
     var icons = o.icons !== false && v.icons !== false;
@@ -81,7 +81,7 @@
       var txt = (icons ? KINDS[k].icon + ' ' : '') + pick(n, o.mode);
       return idMap[n.id] + sh[0] + '"' + fcText(txt) + '"' + sh[1];
     };
-    var kids = {}, inGroup = {};
+    var kids = Object.create(null), inGroup = Object.create(null);
     groups.forEach(function (g) { var p = g.parent && gMap[g.parent] ? g.parent : ''; (kids[p] = kids[p] || []).push(g); });
     nodes.forEach(function (n) { if (n.group && gMap[n.group]) (inGroup[n.group] = inGroup[n.group] || []).push(n); });
     var emit = function (g, depth) {
@@ -102,10 +102,10 @@
       if (e.sensitive && o.sens) { lbl = '🔒 ' + lbl; sensIdx.push(i); }
       var st = e.style || 'solid';
       var arrow = st === 'dashed' ? '-.->' : st === 'thick' ? '==>' : st === 'both' ? '<-->' : st === 'plain' ? '---' : '-->';
-      lines.push('  ' + a + ' ' + arrow + (lbl ? '|"' + fcText(lbl.trim()) + '"|' : '') + ' ' + b);
+      lines.push('  ' + a + ' ' + arrow + (lbl ? '|"' + fcText(String(lbl).trim()) + '"|' : '') + ' ' + b);
     });
     // classes: the viewer styles these with CSS variables (themes); portable exports add classDef colours
-    var byClass = {};
+    var byClass = Object.create(null);
     var add = function (cls, id) { (byClass[cls] = byClass[cls] || []).push(id); };
     nodes.forEach(function (n) {
       var id = idMap[n.id];
@@ -135,12 +135,12 @@
   // ---------------------------------------------------------------- sequence
   function genSequence(v, o) {
     var parts = v.participants || [];
-    var idMap = {};
+    var idMap = Object.create(null);
     parts.forEach(function (p, i) { idMap[p.id] = 'p' + i; });
     var lines = ['%%{init: {"sequence": {"mirrorActors": false}}}%%', 'sequenceDiagram'];
     if (v.numbered !== false) lines.push('  autonumber');
     var icons = o.icons !== false && v.icons !== false;
-    var groups = {};
+    var groups = Object.create(null);
     (v.groups || []).forEach(function (g) { groups[g.id] = g; });
     var boxes = [], open = null;
     parts.forEach(function (p) {
@@ -157,7 +157,7 @@
     (v.steps || []).forEach(function (s, i) {
       if (s.section) { lines.push('  Note over ' + first + (last !== first ? ',' + last : '') + ': ' + seqText(s.section)); noteToStep.push(i); return; }
       if (!s.from) { if (s.note) { lines.push('  Note over ' + (idMap[s.over] || first) + ': ' + seqText(s.note)); noteToStep.push(i); } return; }
-      var lbl = (o.mode === 'technical' ? (s.technical || s.label) : (s.label || s.technical)) || '';
+      var lbl = String((o.mode === 'technical' ? (s.technical || s.label) : (s.label || s.technical)) || '');
       if (s.sensitive && o.sens) lbl = '🔒 ' + lbl;
       var arrow = s.reply ? '-->>' : (s.async ? '-)' : '->>');
       lines.push('  ' + idMap[s.from] + arrow + idMap[s.to] + ': ' + seqText(lbl));
@@ -175,7 +175,7 @@
   }
   function genClass(v, o) {
     var classes = v.classes || [], rels = v.relations || [];
-    var idMap = {}, rev = {}, nsMap = {}, nsRev = {}, used = {};
+    var idMap = Object.create(null), rev = Object.create(null), nsMap = Object.create(null), nsRev = Object.create(null), used = Object.create(null);
     classes.forEach(function (c, i) { idMap[c.id] = 'c' + i; rev['c' + i] = c.id; });
     (v.groups || []).forEach(function (g) {
       var w = word(pick(g, o.mode), 'area'), k = w, n = 2;
@@ -214,7 +214,7 @@
       lines.push('  ' + (t[1] ? b + ' ' + t[0] + ' ' + a : a + ' ' + t[0] + ' ' + b) + lbl);
       relIndex.push(i);
     });
-    var byClass = {};
+    var byClass = Object.create(null);
     var add = function (cls, id) { (byClass[cls] = byClass[cls] || []).push(id); };
     classes.forEach(function (c) {
       var id = idMap[c.id];
@@ -236,7 +236,7 @@
   var CARD_R = { 'one': '||', 'zero-one': 'o|', 'many': 'o{', 'one-many': '|{' };
   function genER(v, o) {
     var ents = v.entities || [], rels = v.relations || [];
-    var idMap = {}, rev = {};
+    var idMap = Object.create(null), rev = Object.create(null);
     ents.forEach(function (e, i) { idMap[e.id] = 'e' + i; rev['e' + i] = e.id; });
     var lines = ['erDiagram'];
     if (v.direction) lines.push('  direction ' + v.direction);
@@ -272,7 +272,7 @@
   // ---------------------------------------------------------------- state diagram
   function genState(v, o) {
     var states = v.states || [], trans = v.transitions || [];
-    var idMap = {}, rev = {};
+    var idMap = Object.create(null), rev = Object.create(null);
     states.forEach(function (s, i) { idMap[s.id] = 's' + i; rev['s' + i] = s.id; });
     var lines = ['stateDiagram-v2'];
     if (v.direction) lines.push('  direction ' + v.direction);

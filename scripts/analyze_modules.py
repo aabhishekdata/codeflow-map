@@ -64,6 +64,17 @@ def slug(s):
     return s or "root"
 
 
+SECRET_ASSIGN = re.compile(r"(?i)\b([\w.]*(?:password|passwd|pwd|secret|api[_-]?key|token|private[_-]?key|credential|conn(?:ection)?[_-]?str(?:ing)?)[\w]*['\"]?\s*(?::|=|==|\()\s*)(f|r|b|u)?(['\"`])((?:(?!\3).){3,})\3")
+SECRET_SHAPES = re.compile(r"(AKIA[0-9A-Z]{16}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bsk-[A-Za-z0-9_-]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|"
+                           r"(?:jdbc|postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^\s'\"]*:[^\s'\"@]+@)")
+
+
+def redact(s):
+    """Hide literal values assigned to secret-looking names (password = "x" -> password = "•••") and known key shapes."""
+    s = SECRET_ASSIGN.sub(lambda m: m.group(1) + (m.group(2) or "") + m.group(3) + "•••" + m.group(3), s)
+    return SECRET_SHAPES.sub("•••", s)
+
+
 def oneline(s, n):
     s = re.sub(r"\s+", " ", str(s or "")).strip()
     return s if len(s) <= n else s[:n - 1] + "…"
@@ -96,12 +107,24 @@ def is_generated(rel, text):
 
 
 # ====================================================================== Python facts
+_SEG_CACHE = {"src": None, "lines": None}
+
+
 def _seg(src, node):
+    """Fast ast.get_source_segment: the encoded lines are computed once per file (offsets are UTF-8 bytes)."""
+    if node is None or getattr(node, "end_lineno", None) is None:
+        return ""
+    if _SEG_CACHE["src"] is not src:
+        _SEG_CACHE["src"], _SEG_CACHE["lines"] = src, [ln.encode("utf-8") for ln in src.splitlines(True)]
+    L = _SEG_CACHE["lines"]
     try:
-        s = ast.get_source_segment(src, node)
-    except Exception:  # pragma: no cover - very old/odd nodes
-        s = None
-    return s or ""
+        a, b = node.lineno - 1, node.end_lineno - 1
+        if a == b:
+            return L[a][node.col_offset:node.end_col_offset].decode("utf-8", "replace")
+        parts = [L[a][node.col_offset:]] + L[a + 1:b] + [L[b][:node.end_col_offset]]
+        return b"".join(parts).decode("utf-8", "replace")
+    except (IndexError, TypeError):
+        return ""
 
 
 def _dotted(n):
@@ -181,7 +204,7 @@ class PyCfg:
 
     def __init__(self, src, fn, title, max_depth):
         self.src, self.fn, self.max_depth = src, fn, max_depth
-        self.nodes, self.edges, self.loops = [], [], []
+        self.nodes, self.edges, self.loops, self.finals = [], [], [], []
         start = self.add("start", title, fn.lineno)
         ends = self.seq(fn.body, [(start, "")], 0)
         if ends:
@@ -269,6 +292,8 @@ class PyCfg:
         if isinstance(s, ast.Try) or type(s).__name__ == "TryStar":
             t = self.add("try", "try", s.lineno)
             self.link(preds, t)
+            if s.finalbody:
+                self.finals.append([])
             out = self.seq(s.body, [(t, "")], depth + 1)
             if s.orelse:
                 out = self.seq(s.orelse, out, depth + 1)
@@ -278,8 +303,11 @@ class PyCfg:
                 self.edges.append({"from": t, "to": hn, "label": "error"})
                 out = out + self.seq(h.body, [(hn, "")], depth + 1)
             if s.finalbody:
+                exits = self.finals.pop()
                 f = self.add("finally", "finally", s.finalbody[0].lineno)
                 self.link(out, f)
+                for x in exits:   # return / raise inside the try still run the clean-up first
+                    self.edges.append({"from": x, "to": f, "label": "clean-up first"})
                 out = self.seq(s.finalbody, [(f, "")], depth + 1)
             return out
         if isinstance(s, (ast.With, ast.AsyncWith)):
@@ -289,18 +317,26 @@ class PyCfg:
         if type(s).__name__ == "Match":
             c = self.add("cond", "match " + oneline(_seg(self.src, s.subject), 36), s.lineno)
             self.link(preds, c)
-            out = []
+            out, wildcard = [], False
             for case in s.cases:
-                lbl = "case " + oneline(_seg(self.src, case.pattern), 24)
-                out += self.seq(case.body, [(c, lbl)], depth + 1)
+                pat = oneline(_seg(self.src, case.pattern), 24)
+                if pat == "_" and case.guard is None:
+                    wildcard = True
+                out += self.seq(case.body, [(c, "case " + pat)], depth + 1)
+            if not wildcard:
+                out.append((c, "no match"))
             return out
         if isinstance(s, ast.Return):
             r = self.add("return", ("return " + oneline(_seg(self.src, s.value), 40)) if s.value is not None else "return", s.lineno)
             self.link(preds, r)
+            if self.finals:
+                self.finals[-1].append(r)
             return []
         if isinstance(s, ast.Raise):
             r = self.add("raise", "raise " + oneline(_seg(self.src, s.exc), 40) if s.exc is not None else "raise", s.lineno)
             self.link(preds, r)
+            if self.finals:
+                self.finals[-1].append(r)
             return []
         if isinstance(s, ast.Break):
             if self.loops:
@@ -323,19 +359,39 @@ def py_cfg(src, fn, title):
     return g
 
 
-def _strip_notebook_magics(text):
+def notebook_code(path):
+    """Code of a notebook, cell by cell: magics blanked, %% cells and cells that do not compile on their own
+    replaced by blank lines, so one bad cell does not hide the rest. Same line layout as scan_repo.read_text."""
+    try:
+        nb = json.loads(Path(path).read_text(encoding="utf-8-sig", errors="ignore"))
+    except (OSError, ValueError):
+        return ""
     out = []
-    for ln in text.split("\n"):
-        out.append("" if re.match(r"^\s*[%!]", ln) else ln)
+    for c in nb.get("cells", []) if isinstance(nb, dict) else []:
+        src = c.get("source", "")
+        src = "".join(src) if isinstance(src, list) else str(src or "")
+        lines = src.split("\n")
+        if c.get("cell_type") != "code" or (lines and re.match(r"^\s*%%", lines[0])):
+            out.append("\n".join("" for _ in lines))
+        else:
+            body = "\n".join("" if re.match(r"^\s*[%!]", ln) else ln for ln in lines)
+            try:
+                compile(body, "<cell>", "exec", ast.PyCF_ONLY_AST)
+            except (SyntaxError, ValueError, RecursionError, MemoryError):
+                body = "\n".join("" for _ in lines)
+            out.append(body)
+        out.append("")
     return "\n".join(out)
 
 
 def py_facts(rel, text, want_cfg):
-    src = _strip_notebook_magics(text) if rel.endswith(".ipynb") else text
+    src = text
     try:
         tree = ast.parse(src)
     except (SyntaxError, ValueError) as e:
         return {"error": "could not parse: %s" % (getattr(e, "msg", None) or e)}
+    except (RecursionError, MemoryError):
+        return {"error": "too deeply nested or too large to parse"}
     F = {"imports": [], "classes": [], "functions": [], "loc": sum(1 for l in text.split("\n") if l.strip()),
          "main": False, "all_names": [], "routers": {}}
     # router prefixes: items_router = APIRouter(prefix="/items")
@@ -657,7 +713,26 @@ def package_name(spec):
     return spec.split("/")[0]
 
 
-STDLIB = set(getattr(sys, "stdlib_module_names", ())) or {
+def _stdlib_names():
+    names = set(getattr(sys, "stdlib_module_names", ()))
+    if names:
+        return names
+    import sysconfig   # Python 3.8 / 3.9: list the standard-library folder
+    try:
+        d = Path(sysconfig.get_paths()["stdlib"])
+        for p in d.iterdir():
+            n = p.name[:-3] if p.name.endswith(".py") else p.name
+            if n.isidentifier():
+                names.add(n)
+        dyn = d / "lib-dynload"
+        if dyn.is_dir():
+            names.update(p.name.split(".")[0] for p in dyn.iterdir())
+    except (OSError, KeyError):
+        pass
+    return names | set(sys.builtin_module_names)
+
+
+STDLIB = _stdlib_names() or {
     "abc", "argparse", "ast", "asyncio", "base64", "collections", "contextlib", "copy", "csv", "dataclasses", "datetime",
     "decimal", "enum", "functools", "glob", "hashlib", "hmac", "http", "importlib", "inspect", "io", "itertools", "json",
     "logging", "math", "os", "pathlib", "pickle", "random", "re", "secrets", "shutil", "signal", "socket", "sqlite3",
@@ -865,7 +940,8 @@ class Analysis:
         for r in self.files:
             ext = Path(r).suffix.lower()
             if ext in PY_EXT:
-                f = py_facts(r, self.text[r], want_cfg and r not in self.generated)
+                src = notebook_code(self.root / r) if ext == ".ipynb" else self.text[r]
+                f = py_facts(r, src, want_cfg and r not in self.generated)
                 f.setdefault("imports", [])
                 f.setdefault("classes", [])
                 f.setdefault("functions", [])
@@ -961,9 +1037,12 @@ class Analysis:
         files = self.files
         if a.modules_config:
             cfg = json.loads(Path(a.modules_config).read_text(encoding="utf-8"))
-            rules = cfg.get("modules", cfg)
+            rules = cfg.get("modules", cfg) if isinstance(cfg, dict) else cfg
             if isinstance(rules, dict):
                 rules = [{"name": k, "paths": v if isinstance(v, list) else [v]} for k, v in rules.items()]
+            if not isinstance(rules, list) or not all(isinstance(r, dict) and r.get("name") and isinstance(r.get("paths"), list) for r in rules):
+                raise SystemExit('ERROR   --modules-config must look like {"Billing": ["src/billing/**"]} or '
+                                 '[{"name": "Billing", "paths": ["src/billing/**"]}]')
             amap = {}
             rest = []
             for p in files:
@@ -979,9 +1058,17 @@ class Analysis:
             amap = SR.adaptive_areas(files)
         self.mod_of = {}
         mods = {}
+        id_of_area = {}
+        for area in sorted(set(amap.values())):   # distinct folders always get distinct ids
+            base = "m-" + slug(area)
+            mid, n = base, 2
+            while mid in id_of_area.values():
+                mid = "%s-%d" % (base, n)
+                n += 1
+            id_of_area[area] = mid
         for p in files:
             area = amap[p]
-            mid = "m-" + slug(area)
+            mid = id_of_area[area]
             self.mod_of[p] = mid
             M = mods.setdefault(mid, {"id": mid, "path": area, "files": []})
             M["files"].append(p)
@@ -1022,14 +1109,27 @@ class Analysis:
                 fn.update(file=r, key=key, module=self.mod_of.get(r))
                 self.fns[key] = fn
                 if "." not in fn["qual"] or fn.get("route"):
-                    self.top_names[r].setdefault(fn["qual"], key)
+                    self.top_names[r][fn["qual"]] = key   # a later definition replaces an earlier one
             for c in f.get("classes", []):
                 c["file"], c["module"] = r, self.mod_of.get(r)
                 self.cls_index[r + "::" + c["name"]] = c
                 self.top_names[r].setdefault("class:" + c["name"], r + "::" + c["name"])
 
-    def _lookup(self, f, name, depth=0):
+    def _lookup(self, f, name, depth=0, seen=None):
         """Find a top-level function or class called `name` in file f (following re-exports and * imports)."""
+        cache = self.__dict__.setdefault("_lk", {})
+        if (f, name) in cache:
+            return cache[(f, name)]
+        seen = set() if seen is None else seen
+        if (f, name) in seen:
+            return None
+        seen.add((f, name))
+        hit = self._lookup_raw(f, name, depth, seen)
+        if depth == 0:
+            cache[(f, name)] = hit
+        return hit
+
+    def _lookup_raw(self, f, name, depth, seen):
         t = self.top_names.get(f, {})
         if name in t:
             return t[name]
@@ -1041,22 +1141,22 @@ class Analysis:
         if name == "default":
             for e in self.facts.get(f, {}).get("exports", []):
                 if e.startswith("default:"):
-                    return self._lookup(f, e.split(":", 1)[1], depth)
+                    return self._lookup(f, e.split(":", 1)[1], depth, seen)
         if depth < 3:
             fa = self.facts.get(f, {})
             for rx in fa.get("reexports", []):
                 if "*" in rx["names"] or name in rx["names"]:
                     tf = self.R.js_import(f, rx["source"])
                     if tf:
-                        hit = self._lookup(tf, name, depth + 1)
+                        hit = self._lookup(tf, name, depth + 1, seen)
                         if hit:
                             return hit
             if name in self.symbols.get(f, {}):          # Python package __init__ re-exporting a name
                 tf, sym = self.symbols[f][name]
                 if sym:
-                    return self._lookup(tf, sym, depth + 1)
+                    return self._lookup(tf, sym, depth + 1, seen)
             for tf in self.star.get(f, []):
-                hit = self._lookup(tf, name, depth + 1)
+                hit = self._lookup(tf, name, depth + 1, seen)
                 if hit:
                     return hit
         return None
@@ -1422,7 +1522,7 @@ class Views:
     def fn_label(self, fn):
         if fn.get("route"):
             return fn["route"]["method"] + " " + (fn["route"]["path"] or "/")
-        if fn.get("cls") and fn["name"] in ("constructor", "__init__"):
+        if fn.get("cls") and (fn["name"] == "__init__" or (fn["name"] == "constructor" and not fn["file"].endswith((".py", ".ipynb")))):
             return "new %s()" % fn["cls"]
         return (fn["qual"].split(".")[-1] if fn.get("cls") else fn["qual"]) + "()"
 
@@ -1753,7 +1853,8 @@ class Views:
         base = M["path"] + "/" if M["path"] != "(root)" else ""
         sub = {r: (r[len(base):].rsplit("/", 1)[0] if "/" in r[len(base):] else "") for r in fs}
         subs = sorted({x for x in sub.values() if x})
-        groups = [{"id": "sg-" + slug(x), "label": x + "/", "technical": base + x} for x in subs] if len(subs) >= 1 and len(fs) > 4 else []
+        sgid = {x: "sg%d" % i for i, x in enumerate(subs)}
+        groups = [{"id": sgid[x], "label": x + "/", "technical": base + x} for x in subs] if len(subs) >= 1 and len(fs) > 4 else []
         nodes = []
         for r in fs:
             n = {"id": fid[r], "label": Path(r).name, "technical": r, "kind": self.file_kind(r), "description": self.file_desc(r),
@@ -1761,7 +1862,7 @@ class Views:
                  "heat": max([fn["heat"] for fn in A.facts[r].get("functions", []) if "heat" in fn] or [0]),
                  "changed": r in A.changed_files}
             if groups and sub[r]:
-                n["group"] = "sg-" + slug(sub[r])
+                n["group"] = sgid[sub[r]]
             fnames = [self.fn_label(fn) for fn in A.facts[r].get("functions", [])][:12]
             if fnames:
                 n["data"] = fnames
@@ -1873,7 +1974,8 @@ class Views:
         names = Counter(c["name"] for c in list(mine.values()) + [ext[k] for k in used_ext])
         disp = lambda c: c["name"] + (" (%s)" % Path(c["file"]).stem if names[c["name"]] > 1 else "")
         files = sorted({c["file"] for c in mine.values()})
-        groups = [{"id": "fg-" + slug(r), "label": Path(r).stem, "technical": r} for r in files] if 1 < len(files) <= 8 else []
+        gid = {r: "fg%d" % i for i, r in enumerate(files)}
+        groups = [{"id": gid[r], "label": Path(r).stem, "technical": r} for r in files] if 1 < len(files) <= 8 else []
         classes = []
         for c in mine.values():
             stereo = "table" if A.is_table(c) else "interface" if c.get("interface") else \
@@ -1897,7 +1999,7 @@ class Views:
                         {"table": "Database table class", "schema": "Data shape (schema)", "interface": "Type / interface"}.get(stereo, "Class"),
                         c["name"], c["file"], len(attrs), "" if len(attrs) == 1 else "s", len(meths), "" if len(meths) == 1 else "s")}
             if groups:
-                item["group"] = "fg-" + slug(c["file"])
+                item["group"] = gid[c["file"]]
             classes.append(item)
         for k in sorted(used_ext):
             c = ext[k]
@@ -1931,7 +2033,8 @@ class Views:
         keep = [fn for fn in keep if deg[fn["key"]] or fn.get("route") or fn.get("entry") or fn.get("complexity", 1) >= 3] or keep[:12]
         kk = {fn["key"]: "f%d" % i for i, fn in enumerate(keep)}
         files = sorted({fn["file"] for fn in keep})
-        groups = [{"id": "fg-" + slug(r), "label": Path(r).name, "technical": r} for r in files] if len(files) > 1 else []
+        gid = {r: "fg%d" % i for i, r in enumerate(files)}
+        groups = [{"id": gid[r], "label": Path(r).name, "technical": r} for r in files] if len(files) > 1 else []
         nodes = []
         for fn in keep:
             kind = "service" if fn.get("route") else "ui" if fn.get("kind") == "component" else "schedule" if fn.get("entry") else "function"
@@ -1958,7 +2061,7 @@ class Views:
             if ext:
                 n["data"] = ext
             if groups:
-                n["group"] = "fg-" + slug(fn["file"])
+                n["group"] = gid[fn["file"]]
             nodes.append(n)
         edges, seen = [], set()
         for a, b in inner:
@@ -2036,7 +2139,7 @@ class Views:
         idx = {n["id"]: i for i, n in enumerate(g["nodes"])}
         nodes = []
         for n in g["nodes"]:
-            lab = n["label"] or n["t"]
+            lab = redact(n["label"] or n["t"])
             node = {"id": n["id"], "label": lab, "technical": lab + ("\n· line %d" % n["line"] if n.get("line") else ""),
                     "kind": CFG_KIND.get(n["t"], "process"), "description": CFG_DESC.get(n["t"], ""), "confidence": "verified"}
             if n.get("line"):
@@ -2098,7 +2201,7 @@ class Views:
                 if c.get("to"):
                     g = A.fns[c["to"]]
                     dst = file_part(g["file"])
-                    lab = ("creates " + g["cls"]) if g.get("cls") and g["name"] in ("constructor", "__init__") else \
+                    lab = ("creates " + g["cls"]) if self.fn_label(g).startswith("new ") else \
                         ("shows " if c.get("render") else "") + self.fn_label(g)
                     steps.append({"from": src, "to": dst, "label": lab,
                                   "technical": "%s → %s()  %s:%d" % (f["qual"], g["qual"], f["file"], c["line"]),
@@ -2384,6 +2487,11 @@ def summary_md(A, records, out_path, views):
     if A.node_note:
         L.append("")
         L.append("Note: " + A.node_note)
+    bad = sorted(r for r, f in A.facts.items() if f.get("error"))
+    if bad:
+        L.append("")
+        L.append("Note: %d file%s could not be parsed and show no functions or classes (newer syntax than this Python, or a syntax error): %s%s" % (
+            len(bad), "" if len(bad) == 1 else "s", ", ".join(bad[:8]), " …" if len(bad) > 8 else ""))
     L += ["", "| # | Module | Path | Files | Lines | Used by | Uses | Max complexity | Notes |", "|---|---|---|---|---|---|---|---|---|"]
     order = sorted(records, key=lambda r: (-len(r["used_by"]), -r["loc"]))
     for i, r in enumerate(order, 1):

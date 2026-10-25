@@ -79,7 +79,7 @@ def read_text(path):
     try:
         if path.stat().st_size > MAX_BYTES:
             return None
-        txt = path.read_text(encoding="utf-8", errors="ignore")
+        txt = path.read_text(encoding="utf-8-sig", errors="ignore")
     except OSError:
         return None
     if path.suffix == ".ipynb":
@@ -92,6 +92,8 @@ def read_text(path):
                 if c.get("cell_type") == "code":
                     # Fabric/Synapse %%sql magic cells are SQL
                     cells.append(src)
+                else:
+                    cells.append("\n" * src.count("\n"))
                 cells.append("")
             return "\n".join(cells)
         except (ValueError, AttributeError):

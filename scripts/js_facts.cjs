@@ -43,11 +43,16 @@ const endLine = (n) => (n && n.loc ? n.loc.end.line : 0);
 
 function scriptBlock(text, ext) { // .vue / .svelte: analyse the <script> block, keep line numbers
   if (ext !== '.vue' && ext !== '.svelte') return { code: text, lang: ext };
-  const m = /<script\b([^>]*)>([\s\S]*?)<\/script>/i.exec(text);
-  if (!m) return { code: '', lang: '.js' };
-  const before = text.slice(0, m.index + m[0].indexOf('>') + 1);
-  const pad = '\n'.repeat((before.match(/\n/g) || []).length);
-  return { code: pad + m[2], lang: /lang=["']ts/.test(m[1]) ? '.ts' : '.js' };
+  // every <script> block (Vue allows <script> and <script setup>), placed on its original lines
+  const re = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
+  let m, code = '', lines = 0, ts = false;
+  while ((m = re.exec(text))) {
+    const startLine = (text.slice(0, m.index + m[0].indexOf('>') + 1).match(/\n/g) || []).length;
+    code += '\n'.repeat(Math.max(0, startLine - lines)) + m[2];
+    lines = (code.match(/\n/g) || []).length;
+    if (/lang=["']ts/.test(m[1])) ts = true;
+  }
+  return { code, lang: ts ? '.ts' : '.js' };
 }
 
 function parse(code, ext) {
@@ -129,8 +134,9 @@ function cfgAtDepth(code, fnNode, title, maxDepth) {
   const link = (preds, to) => { for (const [p, l] of preds) edges.push({ from: p, to, label: l || '' }); };
   const label = (n) => oneLine(srcOf(code, n).split('\n')[0], 46);
   const start = add('start', title, line(fnNode));
-  const loops = []; // { node, breaks: [] }
-  const tries = []; // handler ids for throw edges
+  const loops = []; // { node, breaks: [], label }
+  const finals = []; // return / throw nodes waiting for an enclosing finally
+  let pendingLabel = null;
 
   const isCompound = (s) => /^(IfStatement|ForStatement|ForInStatement|ForOfStatement|WhileStatement|DoWhileStatement|TryStatement|SwitchStatement|ReturnStatement|ThrowStatement|BreakStatement|ContinueStatement|BlockStatement|LabeledStatement)$/.test(s.type);
 
@@ -162,7 +168,7 @@ function cfgAtDepth(code, fnNode, title, maxDepth) {
   function stmt(s, preds, depth) {
     switch (s.type) {
       case 'BlockStatement': return seq(s.body, preds, depth);
-      case 'LabeledStatement': return stmt(s.body, preds, depth);
+      case 'LabeledStatement': { pendingLabel = s.label.name; const r = stmt(s.body, preds, depth); pendingLabel = null; return r; }
       case 'IfStatement': {
         const c = add('cond', oneLine(srcOf(code, s.test), 46) + '?', line(s)); link(preds, c);
         const t = stmt(s.consequent, [[c, 'yes']], depth + 1);
@@ -175,7 +181,7 @@ function cfgAtDepth(code, fnNode, title, maxDepth) {
         else if (s.type === 'ForStatement') head = 'for (' + oneLine(srcOf(code, s.test), 30) + ')';
         else head = (s.type === 'DoWhileStatement' ? 'do … while ' : 'while ') + oneLine(srcOf(code, s.test), 30);
         const l = add('loop', head, line(s)); link(preds, l);
-        loops.push({ node: l, breaks: [] });
+        loops.push({ node: l, breaks: [], label: pendingLabel }); pendingLabel = null;
         const b = stmt(s.body, [[l, s.type.indexOf('For') === 0 ? 'each' : 'repeat']], depth + 1);
         link(b, l);
         const lp = loops.pop();
@@ -183,7 +189,7 @@ function cfgAtDepth(code, fnNode, title, maxDepth) {
       }
       case 'SwitchStatement': {
         const c = add('cond', 'switch ' + oneLine(srcOf(code, s.discriminant), 36), line(s)); link(preds, c);
-        loops.push({ node: null, breaks: [], isSwitch: true });
+        loops.push({ node: null, breaks: [], isSwitch: true, label: pendingLabel }); pendingLabel = null;
         let out = [], fall = [], hasDefault = false;
         for (const cs of s.cases) {
           const cl = cs.test ? 'case ' + oneLine(srcOf(code, cs.test), 24) : 'default';
@@ -199,31 +205,37 @@ function cfgAtDepth(code, fnNode, title, maxDepth) {
       }
       case 'TryStatement': {
         const t = add('try', 'try', line(s)); link(preds, t);
-        tries.push(t);
+        if (s.finalizer) finals.push([]);
         let out = stmt(s.block, [[t, '']], depth + 1);
-        tries.pop();
         if (s.handler) {
           const h = add('catch', 'catch' + (s.handler.param ? ' (' + oneLine(srcOf(code, s.handler.param), 20) + ')' : ''), line(s.handler));
           edges.push({ from: t, to: h, label: 'error' });
           out = out.concat(stmt(s.handler.body, [[h, '']], depth + 1));
         }
         if (s.finalizer) {
+          const exits = finals.pop();
           const f = add('finally', 'finally', line(s.finalizer)); link(out, f);
+          for (const x of exits) edges.push({ from: x, to: f, label: 'clean-up first' });
           out = stmt(s.finalizer, [[f, '']], depth + 1);
         }
         return out;
       }
       case 'ReturnStatement': {
         const r = add('return', s.argument ? 'return ' + oneLine(srcOf(code, s.argument), 40) : 'return', line(s)); link(preds, r);
+        if (finals.length) finals[finals.length - 1].push(r);
         return [];
       }
       case 'ThrowStatement': {
         const r = add('raise', 'throw ' + oneLine(srcOf(code, s.argument), 40), line(s)); link(preds, r);
+        if (finals.length) finals[finals.length - 1].push(r);
         return [];
       }
-      case 'BreakStatement': { const lp = loops[loops.length - 1]; if (lp) lp.breaks.push(...preds); return []; }
+      case 'BreakStatement': {
+        const lp = s.label ? [...loops].reverse().find((x) => x.label === s.label.name) : loops[loops.length - 1];
+        if (lp) lp.breaks.push(...preds); return [];
+      }
       case 'ContinueStatement': {
-        let lp = null; for (let i = loops.length - 1; i >= 0; i--) if (!loops[i].isSwitch) { lp = loops[i]; break; }
+        let lp = null; for (let i = loops.length - 1; i >= 0; i--) if (!loops[i].isSwitch && (!s.label || loops[i].label === s.label.name)) { lp = loops[i]; break; }
         if (lp) link(preds.map(([p, l]) => [p, l ? l + ', next' : 'next']), lp.node); return [];
       }
       default: return preds;

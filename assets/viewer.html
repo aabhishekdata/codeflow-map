@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <!-- No data leaves this page: fetch/XHR, forms and frames are blocked. Scripts are inline (or, with --cdn, the pinned Pele file). -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: blob:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: blob:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'">
 <title>Code Flow Map</title>
 <style>
 :root{
@@ -361,7 +361,9 @@ const App = (() => {
     });
     $('kindStyles').textContent = rules;
     const t = S.data.theme || {};
-    const vars = o => Object.entries(o || {}).filter(([k]) => /^--[\w-]+$/.test(k)).map(([k, v]) => `${k}:${String(v).replace(/[;{}<>]/g, '')};`).join('');
+    // only plain colours / lengths / font names: no quotes, url(), braces or semicolons
+    const vars = o => Object.entries(o || {}).filter(([k, v]) => /^--[\w-]+$/.test(k) && /^[#\w\s.,%()-]{1,80}$/.test(String(v)) && !/url\s*\(|expression/i.test(String(v)))
+      .map(([k, v]) => `${k}:${String(v)};`).join('');
     if (t.light || t.dark) $('themeOverrides').textContent = `:root{${vars(t.light)}} :root[data-theme="dark"]{${vars(t.dark)}} @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){${vars(t.dark)}}}`;
   }
   function setTheme(mode){
@@ -377,8 +379,10 @@ const App = (() => {
     const v = S.views[viewId]; if (!v) return;
     if (!opts.keepWalk) stopWalk();
     closePanel();
-    S.view = v; S.gen = G.gen(v, genOpts());
+    S.view = v;
     const el = $('diagram');
+    try { S.gen = G.gen(v, genOpts()); }
+    catch (err) { S.gen = { code: '', meta: { type: v.type } }; renderChrome(v); showError(err); return; }
     const options = Object.assign({}, PELE_OPTS, {
       zoom: { always: true, maxScale: 4, labels: { zoomIn: 'Zoom in', zoomOut: 'Zoom out', reset: 'Fit to screen' } },
       onRender: afterRender,
@@ -564,7 +568,7 @@ const App = (() => {
     const base = S.data.repo?.url_base;
     return '<div class="files">' + files.map(f => {
       const m = String(f).match(/^(.*?):(\d+)$/); const p = m ? m[1] : String(f), line = m ? m[2] : '';
-      if (base && !/\s→\s/.test(f)) { const href = base.replace(/\/?$/, '/') + p + (line ? `#L${line}` : ''); return `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(f)}</a>`; }
+      if (base && /^https?:\/\//i.test(base) && !/\s→\s/.test(f)) { const href = base.replace(/\/?$/, '/') + p + (line ? `#L${line}` : ''); return `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${esc(f)}</a>`; }
       return `<span>${esc(f)}</span>`;
     }).join('') + '</div>';
   }
@@ -859,7 +863,8 @@ const App = (() => {
   function exportSvg(v){
     const css = getComputedStyle(document.body);
     const r = pele.render(portable(v), Object.assign({}, PELE_OPTS, { idPrefix: 'x' + slug(v.id), fontFamily: css.fontFamily }));
-    const vars = `--pele-bg:${css.getPropertyValue('--surface')};--pele-fg:${css.getPropertyValue('--ink')};--pele-line:${css.getPropertyValue('--ink-3')};--pele-border:${css.getPropertyValue('--line-2')};--pele-surface:${css.getPropertyValue('--surface')};--pele-surface-alt:${css.getPropertyValue('--surface-2')};--pele-muted:${css.getPropertyValue('--ink-3')};`;
+    const cv = n => css.getPropertyValue(n).trim().replace(/[^#\w\s.,%()-]/g, '');
+    const vars = `--pele-bg:${cv('--surface')};--pele-fg:${cv('--ink')};--pele-line:${cv('--ink-3')};--pele-border:${cv('--line-2')};--pele-surface:${cv('--surface')};--pele-surface-alt:${cv('--surface-2')};--pele-muted:${cv('--ink-3')};`;
     return r.svg.replace('<svg ', `<svg data-theme-vars="1" `).replace(/style="/, `style="${vars}`);
   }
   function allMarkdown(){

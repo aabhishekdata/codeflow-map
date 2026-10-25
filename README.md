@@ -38,9 +38,9 @@ Copy the whole `codeflow-map` folder (keep its sub-folders) to one of:
 | `~/.copilot/skills/codeflow-map/` (Windows: `%USERPROFILE%\.copilot\skills\codeflow-map\`) | Just you, in every repository |
 
 Requirements: VS Code with GitHub Copilot in **Agent** mode (choose a Claude model), a VS Code version
-that supports Agent Skills, **Python 3.8+**, and **Node.js 18+** (20+ tested). Node is used for JavaScript /
-TypeScript analysis and to check every diagram draws; without it the skill still works (JS/TS imports
-only, no drawing check). No pip or npm installs, no internet. Reload VS Code after copying the folder;
+that supports Agent Skills, **Python 3.8+**, and **Node.js** (14+ for JavaScript / TypeScript analysis,
+18+ for the check that every diagram draws; 20 and 22 tested). Without Node the skill still works (JS/TS
+imports only, no drawing check). No pip or npm installs, no internet. Reload VS Code after copying the folder;
 `codeflow-map` then appears in the `/` menu of Copilot Chat.
 
 ## Use
@@ -87,7 +87,7 @@ python scripts/build_flowmap.py --modules path/to/repo/.codeflow/modules.json --
 python scripts/build_flowmap.py examples/sample-module-notes.json --modules path/to/repo/.codeflow/modules.json --out repo-map.html
 ```
 
-Builder options: `--check` (validate only), `--strict`, `--cdn` (small file that loads Pele from
+Builder options: `--check` (validate only), `--strict`, `--node <path>`, `--cdn` (small file that loads Pele from
 cdn.jsdelivr.net, pinned and integrity-checked), `--svg-dir <dir>` (one SVG per view). Analyzer options:
 `--select`, `--cfg file:function`, `--diff <branch>`, `--module-depth`, `--modules-config`, `--report`;
 see `python scripts/analyze_modules.py --help`.

@@ -22,7 +22,7 @@
   export of all views as Markdown, copy link to a view.
 
 ### Changed
-- Diagrams are drawn with Pele 1.10.0 instead of Mermaid 11. The default build is offline (~1 MB);
+- Diagrams are drawn with Pele 1.10.0 instead of Mermaid 11. The default build is offline (Pele ~0.7 MB inlined);
   `--cdn` loads Pele from jsDelivr (pinned, integrity-checked). `--split` was removed.
 - Zoom and pan use Pele's built-in zoom; the plain mouse wheel zooms too. The mini-map was removed.
 - Drill-down is click → panel → **See inside** (double-click zooms).
@@ -30,7 +30,7 @@
 
 ### Compatibility
 - V1 specs build unchanged.
-- Python 3.8+ (tested on 3.8.20 and 3.13). Node.js 18+ recommended (tested on 20 and 22); without Node,
+- Python 3.8+ (tested on 3.8.20 and 3.13). Node.js 14+ for JS/TS analysis, 18+ for the drawing check (tested on 20 and 22); without Node,
   JS/TS gets import analysis only and the drawing check is skipped.
 
 ## 1.0.0 (2026-10-22)

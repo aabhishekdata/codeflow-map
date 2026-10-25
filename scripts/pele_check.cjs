@@ -25,15 +25,17 @@ vm.runInContext(fs.readFileSync(path.join(assets, 'flowmap-gen.js'), 'utf8'), ct
 const pele = ctx.pele, G = ctx.FlowmapGen;
 const version = (fs.readFileSync(path.join(assets, 'vendor', 'pele.global.js'), 'utf8').match(/Pele (\d+\.\d+\.\d+)/) || [])[1] || '?';
 
-const spec = JSON.parse(fs.readFileSync(specPath, 'utf8'));
+let spec;
+try { spec = JSON.parse(fs.readFileSync(specPath, 'utf8')); } catch (e) { process.stdout.write(JSON.stringify({ error: 'cannot read spec: ' + e.message })); process.exit(2); }
 const out = { pele: version, checked: 0, errors: [], svgs: [] };
 if (svgDir) fs.mkdirSync(svgDir, { recursive: true });
-for (const v of spec.views || []) {
+for (const v of (Array.isArray(spec.views) ? spec.views : [])) {
   const variants = [['simple', false], ['technical', false], ['simple', true]];
   for (const [mode, portable] of variants) {
-    const g = G.gen(v, { mode, portable, sens: true, icons: spec.icons === false ? false : undefined });
+    let g = { code: '' };
     out.checked++;
     try {
+      g = G.gen(v, { mode, portable, sens: true, icons: spec.icons === false ? false : undefined });
       const r = pele.render(g.code, { idPrefix: 'chk', limit: 200000, maxEdges: 5000 });
       if (svgDir && portable) {
         const safe = String(v.id).replace(/[^A-Za-z0-9_-]+/g, '_');

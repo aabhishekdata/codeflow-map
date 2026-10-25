@@ -7,7 +7,7 @@ description: Builds one interactive, offline HTML map of how a codebase works. A
 # Code Flow Map (v2)
 
 Produce **one HTML file** that explains a codebase visually. It opens in any browser by double-click,
-works offline (the Pele drawing library is inlined, ~1 MB), and keeps file-level evidence behind every box.
+works offline (the Pele drawing library, ~0.7 MB, is inlined; a typical map is 1-2 MB), and keeps file-level evidence behind every box.
 
 It holds two kinds of picture, in any combination:
 
@@ -36,8 +36,9 @@ Files in this skill (paths are relative to this SKILL.md):
 - [references/plain-language.md](references/plain-language.md): how to write labels, descriptions and walkthroughs
 - [examples/](examples/): a stakeholder spec and a module-enrichment spec to copy from
 
-Requirements: Python 3.8+. Node.js 18+ (20+ tested) for JavaScript/TypeScript analysis and the drawing
-check. Without Node everything still runs: JS/TS is scanned for imports only, and the drawing check is skipped.
+Requirements: Python 3.8+. Node.js 14+ for JavaScript/TypeScript analysis and 18+ for the drawing check
+(20 and 22 tested). Without Node everything still runs: JS/TS is scanned for imports only, and the drawing
+check is skipped.
 No package installs and no internet needed.
 
 ## Step 0 - Agree the output (ask once, in one message)
@@ -86,8 +87,9 @@ suggestions, ask which module(s) to explore, and wait.**
 | `--no-drafts` | Skip the automatic sequence and data-flow drafts (when you write verified ones) |
 | `--report .codeflow/module-report.md` | Save the printed summary |
 
-Add `.codeflow/` to `.gitignore` if the user does not want it committed. Re-running is cheap (about a
-second per hundred files) and replaces `modules.json`; never edit that file by hand.
+Add `.codeflow/` to `.gitignore` if the user does not want it committed. Re-running is cheap (a few
+seconds for a few hundred files, under a minute for about a thousand) and replaces `modules.json`; never
+edit that file by hand.
 
 ## Step 2 - Deep dive the chosen module (1a, 1c)
 
@@ -196,7 +198,9 @@ so key function notes by function id, never by view id.
 ## Troubleshooting
 
 - *Node.js not found*: JS/TS gets imports only and the drawing check is skipped. Ask the user for the
-  path to Node and pass `--node <path>` to `analyze_modules.py`.
+  path to Node and pass `--node <path>` to both `analyze_modules.py` and `build_flowmap.py`.
+- *Some files "could not be parsed"* (listed in the summary): they use syntax newer than the Python
+  running the analyzer (e.g. `match` on 3.8/3.9) or have errors; run it with a newer Python if available.
 - *Modules too coarse or too fine*: `--module-depth N` or `--modules-config`.
 - *A picture is too dense*: lower `--max-call-nodes`, split into `detail` views with `drilldown`, or use
   `--select` for one module at a time. Readers can zoom; the phone layout re-flows automatically.

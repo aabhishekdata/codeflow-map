@@ -230,6 +230,12 @@ def validate(spec):
     if spec.get("start_view") and spec["start_view"] not in view_ids:
         rep.err("spec.start_view", "'%s' is not a view id" % spec["start_view"])
     gen = spec.get("generated") or {}
+    if not isinstance(gen, dict):
+        rep.err("spec.generated", "must be an object like {\"date\": ..., \"commit\": ...}")
+        gen = {}
+    for key in ("modules", "functions"):
+        if spec.get(key) is not None and not isinstance(spec[key], list):
+            rep.err("spec." + key, "must be a list")
     if not gen.get("date"):
         rep.warn("spec.generated", "add 'date' so readers know how current the map is")
     if not gen.get("commit"):
@@ -367,6 +373,9 @@ def validate(spec):
                             rep.err(CW, "'%s' must be a list of strings" % key)
             for i, r in enumerate(v.get("relations") or []):
                 RW = "%s.relations[%d]" % (W, i)
+                if not isinstance(r, dict):
+                    rep.err(RW, "must be an object")
+                    continue
                 if r.get("from") not in cids or r.get("to") not in cids:
                     rep.err(RW, "from/to must be class ids in this view")
                 if r.get("type", "association") not in REL_TYPES:
@@ -383,6 +392,9 @@ def validate(spec):
                     _check_label(e, "%s.entities[%s]" % (W, e["id"]), rep, need_desc=False)
             for i, r in enumerate(v.get("relations") or []):
                 RW = "%s.relations[%d]" % (W, i)
+                if not isinstance(r, dict):
+                    rep.err(RW, "must be an object")
+                    continue
                 if r.get("from") not in eids or r.get("to") not in eids:
                     rep.err(RW, "from/to must be entity ids in this view")
                 for k in ("card_from", "card_to"):
@@ -397,6 +409,9 @@ def validate(spec):
             sids = _ids(states, W + ".states", rep)
             for i, t in enumerate(v.get("transitions") or []):
                 TW = "%s.transitions[%d]" % (W, i)
+                if not isinstance(t, dict):
+                    rep.err(TW, "must be an object")
+                    continue
                 for end in ("from", "to"):
                     if t.get(end) != "*" and t.get(end) not in sids:
                         rep.err(TW, "'%s' = '%s' must be a state id or '*' (start / end)" % (end, t.get(end)))
@@ -414,21 +429,39 @@ def validate(spec):
     for i, m in enumerate(spec.get("modules", []) or []):
         if isinstance(m, dict) and module_ids is not None and m.get("id") not in module_ids:
             rep.warn("spec.modules[%d]" % i, "'%s' is not a module id from the analysis; the note is ignored" % m.get("id"))
-    blob = json.dumps(spec, ensure_ascii=False)
-    for pat in SECRET_PATTERNS:
-        m = pat.search(blob)
-        if m:
-            rep.err("spec", "looks like a secret or credential is embedded ('%s...'); describe it instead of copying values" % m.group(0)[:12])
-    for pat in PII_PATTERNS:
-        for m in pat.finditer(blob):
-            if not PII_ALLOW.search(m.group(0)):
-                rep.warn("spec", "possible personal data ('%s...'); use field names, not real values" % m.group(0)[:3])
-                break
+    strings = []
+
+    def collect(o):
+        if isinstance(o, str):
+            strings.append(o)
+        elif isinstance(o, dict):
+            for k, x in o.items():
+                strings.append(str(k))
+                collect(x)
+        elif isinstance(o, list):
+            for x in o:
+                collect(x)
+    collect(spec)
+    secret_hit = pii_hit = False
+    for text in strings:
+        for pat in SECRET_PATTERNS:
+            m = pat.search(text)
+            if m and not secret_hit:
+                secret_hit = True
+                rep.err("spec", "looks like a secret or credential is embedded ('%s...'); describe it instead of copying values" % m.group(0)[:12])
+        for pat in PII_PATTERNS:
+            for m in pat.finditer(text):
+                if not pii_hit and not PII_ALLOW.search(m.group(0)):
+                    pii_hit = True
+                    rep.warn("spec", "possible personal data ('%s...'); use field names, not real values" % m.group(0)[:3])
     return rep
 
 
 def _check_walk(v, W, rep, node_ids, group_ids, view_ids, edges):
-    pairs = {(e.get("from"), e.get("to")) for e in edges if isinstance(e, dict)}
+    pairs = {(e.get("from"), e.get("to")) for e in (edges if isinstance(edges, list) else []) if isinstance(e, dict)}
+    if not isinstance(v.get("walkthrough") or [], list):
+        rep.err(W + ".walkthrough", "must be a list of steps")
+        return
     for i, w in enumerate(v.get("walkthrough") or []):
         WW = "%s.walkthrough[%d]" % (W, i)
         if not isinstance(w, dict) or not (w.get("text") or w.get("technical")):
@@ -442,13 +475,18 @@ def _check_walk(v, W, rep, node_ids, group_ids, view_ids, edges):
             rep.err(WW, "target '%s' is not a box id in this view" % w["target"])
         if w.get("group") and w["group"] not in group_ids:
             rep.err(WW, "group '%s' not found" % w["group"])
-        if w.get("edge") and tuple(w["edge"]) not in pairs:
+        if w.get("edge") and (not isinstance(w["edge"], list) or len(w["edge"]) != 2):
+            rep.err(WW, "edge must be [from, to]")
+        elif w.get("edge") and tuple(w["edge"]) not in pairs:
             rep.err(WW, "edge %s does not exist in this view" % w["edge"])
 
 
 # ====================================================================== Pele check (Node)
+NODE_OVERRIDE = None
+
+
 def find_node():
-    exe = shutil.which("node") or shutil.which("nodejs")
+    exe = NODE_OVERRIDE or shutil.which("node") or shutil.which("nodejs")
     if not exe:
         return None, None
     try:
@@ -475,7 +513,11 @@ def pele_check(spec, svg_dir=None):
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=900, encoding="utf-8")
             res = json.loads(r.stdout or "{}")
         except (subprocess.SubprocessError, ValueError, OSError) as e:
-            return [], "drawing check could not run (%s): skipped." % e
+            return ["ERROR   the Pele drawing check failed to run (%s). Fix it, or pass --no-node to skip the check." % e], ""
+        if r.returncode != 0 or res.get("error") or "checked" not in res:
+            detail = res.get("error") or (r.stderr or "").strip().splitlines()[-1:] or ["no output"]
+            return ["ERROR   the Pele drawing check failed (exit %d): %s. Fix it, or pass --no-node to skip the check." % (
+                r.returncode, detail if isinstance(detail, str) else detail[0])], ""
     errs = []
     for e in res.get("errors", []):
         errs.append("ERROR   views[%s] (%s): Pele cannot draw it: %s%s\n%s" % (
@@ -499,7 +541,9 @@ def build(spec, out, mode="offline"):
     tpl = TEMPLATE.read_text(encoding="utf-8")
     spec = dict(spec, _build={"mode": mode, "pele": PELE_VERSION})
     data = json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
-    data = data.replace("</", "<\\/").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    # every <, > and & as a JSON escape: repository text can never open or close a tag or comment here
+    data = data.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026") \
+        .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
     if mode == "cdn":
         tag = ('<script src="%s" integrity="%s" crossorigin="anonymous" referrerpolicy="no-referrer"></script>' % (PELE_CDN, pele_sri()))
         tpl = tpl.replace("default-src 'self' 'unsafe-inline' data: blob:;",
@@ -542,13 +586,19 @@ def main(argv=None):
     ap.add_argument("--offline", action="store_true", help="(default) inline Pele; kept for compatibility")
     ap.add_argument("--svg-dir", help="also write one SVG per view here")
     ap.add_argument("--no-node", action="store_true", help="skip the Pele drawing check in Node")
+    ap.add_argument("--node", help="path to the node executable (default: node on PATH)")
     ap.add_argument("--quiet-generated", action="store_true", help="do not list warnings for generated module views")
     a = ap.parse_args(argv)
     if not a.spec and not a.modules:
         ap.error("give a spec file, --modules, or both")
+    global NODE_OVERRIDE
+    NODE_OVERRIDE = a.node
     spec = load_json(a.spec, "spec") if a.spec else {}
     if spec is None:
         return 2
+    if not isinstance(spec, dict):
+        print("ERROR   spec: top level must be a JSON object")
+        return 1
     mods = load_json(a.modules, "modules") if a.modules else None
     if a.modules and mods is None:
         return 2
