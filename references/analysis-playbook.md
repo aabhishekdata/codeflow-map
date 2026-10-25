@@ -11,7 +11,13 @@ code-visualization tools (all MIT-licensed; ideas only, no code copied):
 | Click a component to reach its source | GitDiagram | `files` become links when `repo.url_base` is set |
 | Trace the call chain from one function, limited depth | code2flow | `scan_repo.py --trace <fn> --depth 3` |
 | One page per component plus data-flow diagrams | DeepWiki-Open | Click panel per box; dedicated `dataflow` views |
-| Folder-level dependency graph and metrics | Emerge | `area_dependencies` in the scan output |
+| Folder-level dependency graph and metrics | Emerge | `area_dependencies` in the scan output; the full module map from `analyze_modules.py` |
+| Control-flow graphs of single functions | code2flow, pyflowchart | *Control flow* facet: decisions, loops, errors, returns from the AST |
+| Hotspots = complexity × change frequency | "code as a crime scene" idea | 🔥 *Hotspots* switch and the analyzer report |
+
+This playbook covers the **stakeholder views** (big picture, journeys, data flow). For exploring a single
+module in depth, follow `references/module-deep-dive.md`. The module analysis is also a good starting
+point for the big picture: its *Modules* view and `uses` / `used_by` show which folders form the real parts.
 
 ## Step A - write the story first (2 minutes, not shown to the user)
 

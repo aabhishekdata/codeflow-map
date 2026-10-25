@@ -51,6 +51,22 @@ One or two sentences. First what it does, then why it matters. Active voice, pre
 | Retry, fallback | tries again / backup route |
 | Log, audit table | record kept for checking later |
 
+## Module and function notes
+
+The module map starts with folder names ("api", "core", "utils"). Your notes turn them into a story.
+
+| Folder name | Better `label` | `description` |
+|---|---|---|
+| `api` | Web API | Receives every request from the website, checks who is asking and passes the work on. |
+| `crud.py` / `repository` | Data access | The only code that reads and writes the database. |
+| `core` | Settings and security | Configuration, password hashing and sign-in tokens used by the rest of the code. |
+| `utils` | Shared helpers | Small functions used everywhere: dates, formatting, emails. |
+| `components/ui` | Screen building blocks | Buttons, menus and forms that every screen reuses. |
+
+For a function, say what it achieves and the decision that matters: "Lets an administrator change a
+user's details, refusing an email address someone else already uses", not "Updates user via PATCH and
+validates uniqueness".
+
 ## Walkthrough text
 
 The walkthrough is the script someone reads aloud in a meeting.

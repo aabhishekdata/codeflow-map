@@ -1,51 +1,66 @@
 #!/usr/bin/env python3
-"""Build a single, fully offline, interactive HTML flow map from a flowmap JSON spec.
+"""Build one interactive HTML flow map from a flowmap spec and/or a module analysis.
 
 Usage:
-    python build_flowmap.py <flowmap.json> [--out codeflow-map.html] [--offline | --split] [--check]
+    python build_flowmap.py <flowmap.json> [--out map.html]                        # hand-written views only
+    python build_flowmap.py --modules .codeflow/modules.json [--out map.html]      # module map + deep dives only
+    python build_flowmap.py <flowmap.json> --modules .codeflow/modules.json        # both, merged (spec wins on ids)
 
-  (default) small HTML (~0.1 MB) that loads Mermaid from cdn.jsdelivr.net, pinned to one
-            version and protected by a Subresource Integrity hash
-  --offline one self-contained ~3.6 MB HTML; no internet needed (use if the CDN is blocked)
-  --split   offline, as viewer + mermaid.min.js + flowmap-data.js kept side by side
-  --check   validate the spec only (no HTML written)
+Options:
+  (default)    one self-contained HTML (~1 MB + your data) with the Pele drawing library inlined; works offline
+  --cdn        smaller HTML that loads Pele from cdn.jsdelivr.net (pinned version + integrity hash)
+  --check      validate only, write nothing
+  --strict     treat warnings as errors
+  --svg-dir D  also write one SVG file per view into D (needs Node 18+)
+  --no-node    skip the Pele check in Node (structure is still validated)
 
-Standard library only (Python 3.8+). The spec format is documented in
-references/spec-schema.md.
+Every view is drawn with Pele (via Node) before the HTML is written, so a map that builds is a map that
+renders. Standard library only (Python 3.8+); Node 18+ recommended for the drawing check.
+The spec format is documented in references/spec-schema.md.
 """
 import argparse
 import base64
+import copy
 import hashlib
 import json
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ASSETS = HERE.parent / "assets"
 TEMPLATE = ASSETS / "viewer.html"
-MERMAID = ASSETS / "vendor" / "mermaid.min.js"
-MERMAID_VERSION = "11.17.2"   # must match assets/vendor/mermaid.min.js (the integrity hash is computed from it)
+GEN = ASSETS / "flowmap-gen.js"
+PELE = ASSETS / "vendor" / "pele.global.js"
+PELE_VERSION = "1.10.0"   # must match assets/vendor/pele.global.js (the integrity hash is computed from it)
 CDN_HOST = "https://cdn.jsdelivr.net"
-MERMAID_CDN = f"{CDN_HOST}/npm/mermaid@{MERMAID_VERSION}/dist/mermaid.min.js"
+PELE_CDN = "%s/npm/pele@%s/dist/pele.global.js" % (CDN_HOST, PELE_VERSION)
 
-KINDS = {"user", "ui", "process", "service", "store", "external", "decision",
-         "event", "file", "control", "ai", "schedule"}
-VIEW_KINDS = {"architecture", "journey", "dataflow", "detail", "other"}
-TYPES = {"flowchart", "sequence", "mermaid"}
+KINDS = {"user", "ui", "process", "service", "store", "external", "decision", "event", "file", "control", "ai",
+         "schedule", "module", "function", "package", "start", "end", "loop", "error"}
+VIEW_KINDS = {"architecture", "journey", "dataflow", "detail", "other", "modules", "changes"}
+TYPES = {"flowchart", "sequence", "class", "er", "state", "mermaid"}
+FACETS = {"deps", "files", "classes", "calls", "control", "sequence", "dataflow", "datamodel", "state"}
 DIRECTIONS = {"LR", "RL", "TB", "TD", "BT"}
+REL_TYPES = {"inheritance", "realization", "composition", "aggregation", "association", "dependency", "link"}
+CARDS = {"one", "zero-one", "many", "one-many"}
 SIMPLE_LABEL_MAX_WORDS = 6
 SECRET_PATTERNS = [
     re.compile(r"(?i)(password|passwd|secret|api[_-]?key|token)\s*[:=]\s*['\"][^'\"]{6,}['\"]"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"(?i)(?:jdbc|postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^\s\"']*:[^\s\"'@]+@"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
 ]
 PII_PATTERNS = [
     re.compile(r"(?i)\b(?:[a-z0-9._%+-]+)@(?:[a-z0-9-]+\.)+[a-z]{2,}\b"),
     re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
 ]
+PII_ALLOW = re.compile(r"(?i)(noreply|no-reply|example\.(com|org|net)|users\.noreply\.github\.com|@(localhost|test)\b)")
 
 
 class Report:
@@ -53,38 +68,150 @@ class Report:
         self.errors, self.warnings = [], []
 
     def err(self, where, msg):
-        self.errors.append(f"ERROR   {where}: {msg}")
+        self.errors.append("ERROR   %s: %s" % (where, msg))
 
     def warn(self, where, msg):
-        self.warnings.append(f"WARNING {where}: {msg}")
+        self.warnings.append("WARNING %s: %s" % (where, msg))
 
 
-def _ids(items, where, rep, label="id"):
+# ====================================================================== merge
+def merge(spec, mods):
+    """Spec (hand-written) + module analysis -> one map. Spec views replace generated views with the same id;
+    spec `modules` entries add plain-English notes to the generated modules."""
+    if not mods:
+        return spec
+    spec = spec or {}
+    out = copy.deepcopy(spec)
+    gen_views = mods.get("views", [])
+    spec_views = spec.get("views", [])
+    spec_ids = {v.get("id") for v in spec_views if isinstance(v, dict)}
+    top = [v for v in spec_views if isinstance(v, dict) and v.get("kind") != "detail"]
+    detail = [v for v in spec_views if isinstance(v, dict) and v.get("kind") == "detail"]
+    merged = list(top)
+    for v in gen_views:
+        if v.get("id") in spec_ids:
+            merged.append(next(s for s in spec_views if s.get("id") == v["id"]))
+        else:
+            merged.append(v)
+    merged_ids = {v.get("id") for v in merged}
+    merged += [v for v in detail if v.get("id") not in merged_ids]
+    out["views"] = merged
+    notes = {m.get("id"): m for m in spec.get("modules", []) if isinstance(m, dict)}
+    records = []
+    for m in mods.get("modules", []):
+        n = notes.get(m["id"], {})
+        r = dict(m)
+        for k in ("label", "description", "why", "risks", "controls", "summary"):
+            if n.get(k):
+                r[k] = n[k]
+        records.append(r)
+    out["modules"] = records
+    # a renamed module keeps its new name in the generated summaries too
+    old_labels = {m["id"]: m.get("label") for m in mods.get("modules", [])}
+    for v in out["views"]:
+        mid = v.get("module")
+        if mid in notes and notes[mid].get("label") and old_labels.get(mid) and v.get("id") not in spec_ids:
+            for k in ("summary", "title"):
+                if isinstance(v.get(k), str):
+                    v[k] = v[k].replace(old_labels[mid], notes[mid]["label"])
+    # carry the notes into the boxes that stand for a module
+    rec = {r["id"]: r for r in records}
+    for v in out["views"]:
+        for node in v.get("nodes", []) if v.get("type", "flowchart") == "flowchart" else []:
+            mid = v.get("module") if node.get("id") == "self" else node.get("module")
+            n = notes.get(mid)
+            if not n:
+                continue
+            if n.get("label"):
+                node["label"] = n["label"]
+            whole = v.get("kind") in ("modules", "changes") or node.get("id") == "self"
+            if whole and n.get("description"):
+                node["description"] = n["description"] + ("  (" + rec[mid]["summary"] + ")" if rec.get(mid, {}).get("summary") else "")
+            if whole:
+                for k in ("why", "controls"):
+                    if n.get(k):
+                        node[k] = n[k]
+                if n.get("risks"):
+                    node["risks"] = list(n["risks"]) + [r for r in node.get("risks", []) if r not in n["risks"]]
+    # plain-English notes for individual functions: {"id": "path/file.py::Class.method", "description", "why", "risks"}
+    fnotes = {f.get("id"): f for f in spec.get("functions", []) if isinstance(f, dict) and f.get("id")}
+    if fnotes:
+        for v in out["views"]:
+            if v.get("function") in fnotes and v.get("facet") == "control":
+                fn = fnotes[v["function"]]
+                if fn.get("description"):
+                    v["summary"] = fn["description"] + " " + v.get("summary", "")
+            for node in v.get("nodes", []) if v.get("type", "flowchart") == "flowchart" else []:
+                fn = fnotes.get(node.get("function"))
+                if not fn:
+                    continue
+                if fn.get("label"):
+                    node["label"] = fn["label"]
+                if fn.get("description"):
+                    node["description"] = fn["description"] + ("  (" + node["description"] + ")" if node.get("description") else "")
+                for k in ("why", "controls"):
+                    if fn.get(k):
+                        node[k] = fn[k]
+                if fn.get("risks"):
+                    node["risks"] = list(fn["risks"]) + [r for r in node.get("risks", []) if r not in fn["risks"]]
+    repo = mods.get("repo", {})
+    out.setdefault("title", "%s: how the code is organised" % repo.get("name", "Code base"))
+    out.setdefault("repo", repo)
+    g = dict(mods.get("generated", {}))
+    g.update(spec.get("generated", {}) or {})
+    if mods.get("generated", {}).get("notes"):
+        g["notes"] = list(dict.fromkeys((spec.get("generated", {}) or {}).get("notes", []) + mods["generated"]["notes"]))
+    out["generated"] = g
+    if not spec.get("start_view"):
+        out["start_view"] = top[0]["id"] if top else mods.get("start_view", "modules")
+    return out
+
+
+# ====================================================================== validation
+def _ids(items, where, rep):
     seen = set()
     for i, it in enumerate(items):
         if not isinstance(it, dict):
-            rep.err(f"{where}[{i}]", "must be an object")
+            rep.err("%s[%d]" % (where, i), "must be an object")
             continue
         _id = it.get("id")
-        if not _id or not isinstance(_id, str):
-            rep.err(f"{where}[{i}]", f"missing '{label}'")
+        if _id is None or _id == "" or not isinstance(_id, (str, int)):
+            rep.err("%s[%d]" % (where, i), "missing 'id'")
             continue
         if _id in seen:
-            rep.err(f"{where}[{i}]", f"duplicate id '{_id}'")
+            rep.err("%s[%d]" % (where, i), "duplicate id '%s'" % _id)
         seen.add(_id)
     return seen
 
 
 def _check_label(obj, where, rep, need_desc=True):
-    lab = obj.get("label") or obj.get("technical")
-    if not lab:
+    if not (obj.get("label") or obj.get("technical")):
         rep.err(where, "needs a 'label' (plain English) or 'technical'")
         return
-    if obj.get("label") and len(str(obj["label"]).split()) > SIMPLE_LABEL_MAX_WORDS:
-        rep.warn(where, f"label '{obj['label']}' is long; keep simple labels to <= {SIMPLE_LABEL_MAX_WORDS} words "
-                        "and move detail into 'description'")
+    if need_desc and obj.get("label") and len(str(obj["label"]).split()) > SIMPLE_LABEL_MAX_WORDS:
+        rep.warn(where, "label '%s' is long; keep simple labels to <= %d words and move detail into 'description'" % (obj["label"], SIMPLE_LABEL_MAX_WORDS))
     if need_desc and not obj.get("description"):
         rep.warn(where, "no 'description' - stakeholders who click it will see little")
+
+
+def _check_common_node(n, W, rep, view_ids, group_ids, module_ids, generated):
+    if n.get("kind") and n["kind"] not in KINDS:
+        rep.err(W, "kind '%s' must be one of %s" % (n["kind"], sorted(KINDS)))
+    if n.get("group") and n["group"] not in group_ids:
+        rep.err(W, "group '%s' not found" % n["group"])
+    for key in ("drilldown", "cfg_view"):
+        if n.get(key) and n[key] not in view_ids:
+            rep.err(W, "%s '%s' is not a view id" % (key, n[key]))
+    if n.get("module") and module_ids is not None and n["module"] not in module_ids:
+        rep.err(W, "module '%s' is not a module id" % n["module"])
+    if n.get("confidence") not in (None, "verified", "inferred"):
+        rep.err(W, "confidence must be 'verified' or 'inferred'")
+    if n.get("heat") is not None and not isinstance(n["heat"], (int, float)):
+        rep.err(W, "heat must be a number between 0 and 1")
+    if n.get("metrics") is not None and not isinstance(n["metrics"], dict):
+        rep.err(W, "metrics must be an object of name: value")
+    if not generated and not n.get("files") and n.get("confidence") != "inferred" and n.get("kind") not in ("user", "external", "package", "start", "end"):
+        rep.warn(W, "no 'files' evidence; add file:line refs or mark confidence 'inferred'")
 
 
 def validate(spec):
@@ -99,44 +226,54 @@ def validate(spec):
         rep.err("spec", "'views' must be a non-empty list")
         return rep
     view_ids = _ids(views, "views", rep)
+    module_ids = {m.get("id") for m in spec.get("modules", []) if isinstance(m, dict)} if spec.get("modules") else None
     if spec.get("start_view") and spec["start_view"] not in view_ids:
-        rep.err("spec.start_view", f"'{spec['start_view']}' is not a view id")
+        rep.err("spec.start_view", "'%s' is not a view id" % spec["start_view"])
     gen = spec.get("generated") or {}
     if not gen.get("date"):
         rep.warn("spec.generated", "add 'date' so readers know how current the map is")
     if not gen.get("commit"):
         rep.warn("spec.generated", "add 'commit' (git rev-parse --short HEAD) for traceability")
+    theme = spec.get("theme")
+    if theme is not None and (not isinstance(theme, dict) or theme.get("mode") not in (None, "auto", "light", "dark")):
+        rep.err("spec.theme", "theme must be an object; mode is auto | light | dark")
 
     tab_views = 0
     for vi, v in enumerate(views):
         if not isinstance(v, dict):
             continue
-        W = f"views[{v.get('id', vi)}]"
+        W = "views[%s]" % v.get("id", vi)
+        generated = bool(v.get("generated")) or (bool(v.get("module")) and v.get("kind") == "detail" and v.get("draft")) or v.get("kind") in ("modules", "changes")
         vtype = v.get("type", "flowchart")
         if vtype not in TYPES:
-            rep.err(W, f"type '{vtype}' must be one of {sorted(TYPES)}")
+            rep.err(W, "type '%s' must be one of %s" % (vtype, sorted(TYPES)))
             continue
         if v.get("kind", "other") not in VIEW_KINDS:
-            rep.err(W, f"kind '{v.get('kind')}' must be one of {sorted(VIEW_KINDS)}")
+            rep.err(W, "kind '%s' must be one of %s" % (v.get("kind"), sorted(VIEW_KINDS)))
         if v.get("kind") != "detail" and v.get("show_in_tabs", True):
             tab_views += 1
+        if v.get("facet") and v["facet"] not in FACETS:
+            rep.warn(W, "facet '%s' is not a standard one (%s); it will show as its own tab" % (v["facet"], ", ".join(sorted(FACETS))))
+        if v.get("facet") and not v.get("module"):
+            rep.err(W, "a view with 'facet' also needs 'module'")
+        if v.get("module") and module_ids is not None and v["module"] not in module_ids:
+            rep.err(W, "module '%s' is not a module id (run analyze_modules.py and pass --modules)" % v["module"])
         if not v.get("title"):
             rep.err(W, "missing 'title'")
         if not v.get("summary"):
             rep.warn(W, "no 'summary' - add 1-2 plain-English sentences shown above the diagram")
         if v.get("direction") and v["direction"] not in DIRECTIONS:
-            rep.err(W, f"direction must be one of {sorted(DIRECTIONS)}")
-
+            rep.err(W, "direction must be one of %s" % sorted(DIRECTIONS))
         groups = v.get("groups") or []
         group_ids = _ids(groups, W + ".groups", rep)
         for g in groups:
             if isinstance(g, dict):
                 if g.get("parent") and g["parent"] not in group_ids:
-                    rep.err(f"{W}.groups[{g.get('id')}]", f"parent '{g['parent']}' not found")
+                    rep.err("%s.groups[%s]" % (W, g.get("id")), "parent '%s' not found" % g["parent"])
                 if g.get("drilldown") and g["drilldown"] not in view_ids:
-                    rep.err(f"{W}.groups[{g.get('id')}]", f"drilldown '{g['drilldown']}' is not a view id")
+                    rep.err("%s.groups[%s]" % (W, g.get("id")), "drilldown '%s' is not a view id" % g["drilldown"])
                 if not (g.get("label") or g.get("technical")):
-                    rep.err(f"{W}.groups[{g.get('id')}]", "needs a 'label'")
+                    rep.err("%s.groups[%s]" % (W, g.get("id")), "needs a 'label'")
 
         if vtype == "mermaid":
             if not v.get("mermaid"):
@@ -148,194 +285,304 @@ def validate(spec):
             if not nodes:
                 rep.err(W, "flowchart needs 'nodes'")
             node_ids = _ids(nodes, W + ".nodes", rep)
-            if len(nodes) > 40:
-                rep.warn(W, f"{len(nodes)} boxes is a lot for one picture; split into drill-down views (aim for 5-15)")
+            if len(nodes) > 60:
+                rep.warn(W, "%d boxes is a lot for one picture; split into drill-down views (aim for 5-15)" % len(nodes))
             for n in nodes:
-                if not isinstance(n, dict) or not n.get("id"):
+                if not isinstance(n, dict) or n.get("id") is None:
                     continue
-                NW = f"{W}.nodes[{n['id']}]"
-                _check_label(n, NW, rep)
-                if n.get("kind") and n["kind"] not in KINDS:
-                    rep.err(NW, f"kind '{n['kind']}' must be one of {sorted(KINDS)}")
-                if n.get("group") and n["group"] not in group_ids:
-                    rep.err(NW, f"group '{n['group']}' not found")
-                if n.get("drilldown") and n["drilldown"] not in view_ids:
-                    rep.err(NW, f"drilldown '{n['drilldown']}' is not a view id")
-                if n.get("confidence") not in (None, "verified", "inferred"):
-                    rep.err(NW, "confidence must be 'verified' or 'inferred'")
-                if not n.get("files") and n.get("confidence") != "inferred" and n.get("kind") not in ("user", "external"):
-                    rep.warn(NW, "no 'files' evidence; add file:line refs or mark confidence 'inferred'")
+                NW = "%s.nodes[%s]" % (W, n["id"])
+                _check_label(n, NW, rep, need_desc=not generated)
+                _check_common_node(n, NW, rep, view_ids, group_ids, module_ids, generated)
             edges = v.get("edges") or []
             linked = set()
             for i, e in enumerate(edges):
-                EW = f"{W}.edges[{i}]"
+                EW = "%s.edges[%d]" % (W, i)
                 if not isinstance(e, dict):
                     rep.err(EW, "must be an object")
                     continue
                 for end in ("from", "to"):
                     if e.get(end) not in node_ids:
-                        rep.err(EW, f"'{end}' = '{e.get(end)}' is not a node id in this view")
+                        rep.err(EW, "'%s' = '%s' is not a node id in this view" % (end, e.get(end)))
                 linked.update([e.get("from"), e.get("to")])
-                if e.get("style", "solid") not in ("solid", "dashed", "thick", "both"):
-                    rep.err(EW, "style must be solid | dashed | thick | both")
-                if not (e.get("label") or e.get("technical")):
+                if e.get("style", "solid") not in ("solid", "dashed", "thick", "both", "plain"):
+                    rep.err(EW, "style must be solid | dashed | thick | both | plain")
+                if not generated and not (e.get("label") or e.get("technical")):
                     rep.warn(EW, "unlabelled arrow; say what moves along it (e.g. 'sends claim details')")
-            for nid in node_ids - linked:
-                if len(node_ids) > 1:
-                    rep.warn(f"{W}.nodes[{nid}]", "is not connected to anything")
+            if not generated:
+                for nid in node_ids - linked:
+                    if len(node_ids) > 1:
+                        rep.warn("%s.nodes[%s]" % (W, nid), "is not connected to anything")
             _check_walk(v, W, rep, node_ids, group_ids, view_ids, edges)
 
-        if vtype == "sequence":
+        elif vtype == "sequence":
             parts = v.get("participants") or []
             if len(parts) < 2:
                 rep.err(W, "sequence needs at least 2 'participants'")
             part_ids = _ids(parts, W + ".participants", rep)
             for p in parts:
-                if isinstance(p, dict) and p.get("id"):
-                    _check_label(p, f"{W}.participants[{p['id']}]", rep)
+                if isinstance(p, dict) and p.get("id") is not None:
+                    _check_label(p, "%s.participants[%s]" % (W, p["id"]), rep, need_desc=not generated)
                     if p.get("kind") and p["kind"] not in KINDS:
-                        rep.err(f"{W}.participants[{p['id']}]", f"kind '{p['kind']}' unknown")
+                        rep.err("%s.participants[%s]" % (W, p["id"]), "kind '%s' unknown" % p["kind"])
                     if p.get("group") and p["group"] not in group_ids:
-                        rep.err(f"{W}.participants[{p['id']}]", f"group '{p['group']}' not found")
+                        rep.err("%s.participants[%s]" % (W, p["id"]), "group '%s' not found" % p["group"])
             steps = v.get("steps") or []
             if not steps:
                 rep.err(W, "sequence needs 'steps'")
             msgs = 0
             for i, s in enumerate(steps):
-                SW = f"{W}.steps[{i}]"
+                SW = "%s.steps[%d]" % (W, i)
                 if not isinstance(s, dict):
                     rep.err(SW, "must be an object")
                     continue
                 if s.get("section") or (s.get("note") and not s.get("from")):
                     if s.get("over") and s["over"] not in part_ids:
-                        rep.err(SW, f"over '{s['over']}' not a participant")
+                        rep.err(SW, "over '%s' not a participant" % s["over"])
                     continue
                 msgs += 1
                 for end in ("from", "to"):
                     if s.get(end) not in part_ids:
-                        rep.err(SW, f"'{end}' = '{s.get(end)}' is not a participant id")
+                        rep.err(SW, "'%s' = '%s' is not a participant id" % (end, s.get(end)))
                 if not (s.get("label") or s.get("technical")):
                     rep.warn(SW, "step has no label")
-            if msgs > 30:
-                rep.warn(W, f"{msgs} steps; consider splitting the journey into phases / views")
+            if msgs > 40:
+                rep.warn(W, "%d steps; consider splitting the journey into phases / views" % msgs)
             for i, w in enumerate(v.get("walkthrough") or []):
-                st = w.get("step")
+                st = w.get("step") if isinstance(w, dict) else None
                 if st is not None and (not isinstance(st, int) or st < 0 or st >= len(steps)):
-                    rep.err(f"{W}.walkthrough[{i}]", f"step {st} out of range (0-based index into steps)")
+                    rep.err("%s.walkthrough[%d]" % (W, i), "step %s out of range (0-based index into steps)" % st)
+
+        elif vtype == "class":
+            classes = v.get("classes") or []
+            if not classes:
+                rep.err(W, "class view needs 'classes'")
+            cids = _ids(classes, W + ".classes", rep)
+            for c in classes:
+                if isinstance(c, dict) and c.get("id") is not None:
+                    CW = "%s.classes[%s]" % (W, c["id"])
+                    _check_label(c, CW, rep, need_desc=False)
+                    _check_common_node(c, CW, rep, view_ids, group_ids, module_ids, True)
+                    for key in ("attributes", "methods"):
+                        if c.get(key) is not None and not isinstance(c[key], list):
+                            rep.err(CW, "'%s' must be a list of strings" % key)
+            for i, r in enumerate(v.get("relations") or []):
+                RW = "%s.relations[%d]" % (W, i)
+                if r.get("from") not in cids or r.get("to") not in cids:
+                    rep.err(RW, "from/to must be class ids in this view")
+                if r.get("type", "association") not in REL_TYPES:
+                    rep.err(RW, "type must be one of %s" % sorted(REL_TYPES))
+            _check_walk(v, W, rep, cids, group_ids, view_ids, v.get("relations") or [])
+
+        elif vtype == "er":
+            ents = v.get("entities") or []
+            if not ents:
+                rep.err(W, "er view needs 'entities'")
+            eids = _ids(ents, W + ".entities", rep)
+            for e in ents:
+                if isinstance(e, dict) and e.get("id") is not None:
+                    _check_label(e, "%s.entities[%s]" % (W, e["id"]), rep, need_desc=False)
+            for i, r in enumerate(v.get("relations") or []):
+                RW = "%s.relations[%d]" % (W, i)
+                if r.get("from") not in eids or r.get("to") not in eids:
+                    rep.err(RW, "from/to must be entity ids in this view")
+                for k in ("card_from", "card_to"):
+                    if r.get(k) and r[k] not in CARDS:
+                        rep.err(RW, "%s must be one of %s" % (k, sorted(CARDS)))
+            _check_walk(v, W, rep, eids, group_ids, view_ids, v.get("relations") or [])
+
+        elif vtype == "state":
+            states = v.get("states") or []
+            if not states:
+                rep.err(W, "state view needs 'states'")
+            sids = _ids(states, W + ".states", rep)
+            for i, t in enumerate(v.get("transitions") or []):
+                TW = "%s.transitions[%d]" % (W, i)
+                for end in ("from", "to"):
+                    if t.get(end) != "*" and t.get(end) not in sids:
+                        rep.err(TW, "'%s' = '%s' must be a state id or '*' (start / end)" % (end, t.get(end)))
+            _check_walk(v, W, rep, sids, group_ids, view_ids, v.get("transitions") or [])
 
     if tab_views == 0:
         rep.err("spec", "every view is kind 'detail'; at least one top-level view is needed")
-    # crude secret / personal-data sweep over all strings
+    known_fns = {v.get("function") for v in views if isinstance(v, dict)} | \
+        {n.get("function") for v in views if isinstance(v, dict) for n in (v.get("nodes") or []) if isinstance(n, dict)}
+    for i, f in enumerate(spec.get("functions", []) or []):
+        if not isinstance(f, dict) or not f.get("id"):
+            rep.err("spec.functions[%d]" % i, "needs an 'id' like 'path/file.py::function'")
+        elif f["id"] not in known_fns:
+            rep.warn("spec.functions[%d]" % i, "'%s' does not match any function in the map (check modules.json for the exact id)" % f["id"])
+    for i, m in enumerate(spec.get("modules", []) or []):
+        if isinstance(m, dict) and module_ids is not None and m.get("id") not in module_ids:
+            rep.warn("spec.modules[%d]" % i, "'%s' is not a module id from the analysis; the note is ignored" % m.get("id"))
     blob = json.dumps(spec, ensure_ascii=False)
     for pat in SECRET_PATTERNS:
         m = pat.search(blob)
         if m:
-            rep.err("spec", f"looks like a secret or credential is embedded ('{m.group(0)[:12]}...'); "
-                            "describe it instead of copying values")
+            rep.err("spec", "looks like a secret or credential is embedded ('%s...'); describe it instead of copying values" % m.group(0)[:12])
     for pat in PII_PATTERNS:
-        m = pat.search(blob)
-        if m:
-            rep.warn("spec", f"possible personal data ('{m.group(0)[:3]}...'); use field names, not real values")
+        for m in pat.finditer(blob):
+            if not PII_ALLOW.search(m.group(0)):
+                rep.warn("spec", "possible personal data ('%s...'); use field names, not real values" % m.group(0)[:3])
+                break
     return rep
 
 
 def _check_walk(v, W, rep, node_ids, group_ids, view_ids, edges):
     pairs = {(e.get("from"), e.get("to")) for e in edges if isinstance(e, dict)}
     for i, w in enumerate(v.get("walkthrough") or []):
-        WW = f"{W}.walkthrough[{i}]"
+        WW = "%s.walkthrough[%d]" % (W, i)
         if not isinstance(w, dict) or not (w.get("text") or w.get("technical")):
             rep.err(WW, "each walkthrough step needs 'text'")
             continue
+        if w.get("drill"):
+            if w["drill"] not in view_ids:
+                rep.err(WW, "drill '%s' is not a view id" % w["drill"])
+            continue
         if w.get("target") and w["target"] not in node_ids:
-            rep.err(WW, f"target '{w['target']}' is not a node id")
+            rep.err(WW, "target '%s' is not a box id in this view" % w["target"])
         if w.get("group") and w["group"] not in group_ids:
-            rep.err(WW, f"group '{w['group']}' not found")
+            rep.err(WW, "group '%s' not found" % w["group"])
         if w.get("edge") and tuple(w["edge"]) not in pairs:
-            rep.err(WW, f"edge {w['edge']} does not exist in this view")
-        if w.get("drill") and w["drill"] not in view_ids:
-            rep.err(WW, f"drill '{w['drill']}' is not a view id")
+            rep.err(WW, "edge %s does not exist in this view" % w["edge"])
 
 
+# ====================================================================== Pele check (Node)
+def find_node():
+    exe = shutil.which("node") or shutil.which("nodejs")
+    if not exe:
+        return None, None
+    try:
+        v = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20).stdout.strip()
+        return exe, int(re.match(r"v?(\d+)", v).group(1))
+    except Exception:
+        return None, None
+
+
+def pele_check(spec, svg_dir=None):
+    """Draw every view with Pele exactly as the viewer will. Returns (errors, note)."""
+    node, major = find_node()
+    if not node:
+        return [], "Node.js not found: skipped the drawing check (structure was still validated)."
+    if major < 18:
+        return [], "Node.js %d is too old for the drawing check (18+ needed): skipped." % major
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "spec.json"
+        p.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+        cmd = [node, str(HERE / "pele_check.cjs"), str(p)]
+        if svg_dir:
+            cmd += ["--svg-dir", str(svg_dir)]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900, encoding="utf-8")
+            res = json.loads(r.stdout or "{}")
+        except (subprocess.SubprocessError, ValueError, OSError) as e:
+            return [], "drawing check could not run (%s): skipped." % e
+    errs = []
+    for e in res.get("errors", []):
+        errs.append("ERROR   views[%s] (%s): Pele cannot draw it: %s%s\n%s" % (
+            e["view"], e["mode"], e["message"], " (line %d, col %d)" % (e["line"], e["column"]) if e.get("line") else "",
+            "\n".join("          | " + ln for ln in (e.get("source") or "").split("\n"))))
+    note = "Pele %s drew %d view variant(s)%s." % (res.get("pele", "?"), res.get("checked", 0),
+                                                  ", %d SVG file(s) in %s" % (len(res.get("svgs", [])), svg_dir) if svg_dir else "")
+    return errs, note
+
+
+# ====================================================================== HTML
 def js_safe(text):
-    # prevent an inlined script from closing its <script> element early
     return re.sub(r"</(script)", r"<\\/\1", text, flags=re.I)
 
 
-def mermaid_sri():
-    digest = hashlib.sha384(MERMAID.read_bytes()).digest()
-    return "sha384-" + base64.b64encode(digest).decode()
+def pele_sri():
+    return "sha384-" + base64.b64encode(hashlib.sha384(PELE.read_bytes()).digest()).decode()
 
 
-def build(spec, out, mode="cdn"):
-    """mode: 'cdn' (small file, Mermaid from jsDelivr), 'offline' (one big self-contained file),
-    'split' (viewer + mermaid.min.js + flowmap-data.js side by side, all offline)."""
+def build(spec, out, mode="offline"):
     tpl = TEMPLATE.read_text(encoding="utf-8")
-    spec = dict(spec, _build={"mode": mode, "mermaid": MERMAID_VERSION})
+    spec = dict(spec, _build={"mode": mode, "pele": PELE_VERSION})
     data = json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
     data = data.replace("</", "<\\/").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    if mode == "cdn":
+        tag = ('<script src="%s" integrity="%s" crossorigin="anonymous" referrerpolicy="no-referrer"></script>' % (PELE_CDN, pele_sri()))
+        tpl = tpl.replace("default-src 'self' 'unsafe-inline' data: blob:;",
+                          "default-src 'self' 'unsafe-inline' data: blob:; script-src 'self' 'unsafe-inline' %s;" % CDN_HOST, 1)
+    else:
+        tag = "<script>" + js_safe(PELE.read_text(encoding="utf-8")) + "</script>"
+    # str.replace (not re.sub) so backslashes in the libraries are kept verbatim
+    html = tpl.replace("<!--__PELE__-->", tag, 1)
+    html = html.replace("/*__GEN__*/", js_safe(GEN.read_text(encoding="utf-8")), 1)
+    html = html.replace("/*__FLOWMAP_DATA__*/null", data, 1)
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    if mode == "split":
-        html = tpl.replace("<script>/*__MERMAID_JS__*/</script>", "").replace("/*__FLOWMAP_DATA__*/null", "null")
-        out.write_text(html, encoding="utf-8")
-        shutil.copyfile(MERMAID, out.parent / "mermaid.min.js")
-        (out.parent / "flowmap-data.js").write_text("window.FLOWMAP = " + data + ";\n", encoding="utf-8")
-        return [out, out.parent / "mermaid.min.js", out.parent / "flowmap-data.js"]
-    if mode == "cdn":
-        tag = (f'<script src="{MERMAID_CDN}" integrity="{mermaid_sri()}" crossorigin="anonymous" '
-               f'referrerpolicy="no-referrer"></script>')
-        html = tpl.replace("<script>/*__MERMAID_JS__*/</script>", tag, 1)
-        # allow scripts from the CDN host only; data requests (fetch/XHR) stay blocked
-        html = html.replace("default-src 'self' 'unsafe-inline' data: blob:;",
-                            "default-src 'self' 'unsafe-inline' data: blob:; script-src 'self' 'unsafe-inline' "
-                            + CDN_HOST + ";", 1)
-    else:
-        mer = js_safe(MERMAID.read_text(encoding="utf-8"))
-        # str.replace (not re.sub) so backslashes in the library are kept verbatim
-        html = tpl.replace("/*__MERMAID_JS__*/", mer, 1)
-    html = html.replace("/*__FLOWMAP_DATA__*/null", data, 1)
     out.write_text(html, encoding="utf-8")
-    return [out]
+    return out
+
+
+def load_json(path, what):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        print("ERROR   %s file not found: %s" % (what, path))
+    except json.JSONDecodeError as e:
+        print("ERROR   %s is not valid JSON: line %d col %d: %s" % (path, e.lineno, e.colno, e.msg))
+    return None
 
 
 def main(argv=None):
-    # Windows consoles may not be UTF-8; never crash on an emoji in a label
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(errors="replace")
         except (AttributeError, ValueError):
             pass
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("spec")
+    ap.add_argument("spec", nargs="?", help="flowmap spec (hand-written views)")
+    ap.add_argument("--modules", help="module analysis from analyze_modules.py (.codeflow/modules.json)")
     ap.add_argument("--out", default="codeflow-map.html")
-    ap.add_argument("--check", action="store_true")
-    g = ap.add_mutually_exclusive_group()
-    g.add_argument("--offline", action="store_true", help="embed Mermaid: one ~3.6 MB file that needs no internet")
-    g.add_argument("--split", action="store_true", help="offline, as three small files kept side by side")
+    ap.add_argument("--check", action="store_true", help="validate only")
     ap.add_argument("--strict", action="store_true", help="treat warnings as errors")
+    ap.add_argument("--cdn", action="store_true", help="load Pele from cdn.jsdelivr.net (smaller file, needs internet)")
+    ap.add_argument("--offline", action="store_true", help="(default) inline Pele; kept for compatibility")
+    ap.add_argument("--svg-dir", help="also write one SVG per view here")
+    ap.add_argument("--no-node", action="store_true", help="skip the Pele drawing check in Node")
+    ap.add_argument("--quiet-generated", action="store_true", help="do not list warnings for generated module views")
     a = ap.parse_args(argv)
-    try:
-        spec = json.loads(Path(a.spec).read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        print(f"ERROR   {a.spec} is not valid JSON: line {e.lineno} col {e.colno}: {e.msg}")
+    if not a.spec and not a.modules:
+        ap.error("give a spec file, --modules, or both")
+    spec = load_json(a.spec, "spec") if a.spec else {}
+    if spec is None:
         return 2
-    rep = validate(spec)
-    for line in rep.errors + rep.warnings:
+    mods = load_json(a.modules, "modules") if a.modules else None
+    if a.modules and mods is None:
+        return 2
+    if mods and mods.get("schema", "").split("/")[0] != "codeflow-modules":
+        print("ERROR   %s is not an analyze_modules.py output" % a.modules)
+        return 2
+    full = merge(spec, mods)
+    rep = validate(full)
+    errors = list(rep.errors)
+    warnings = rep.warnings
+    if a.quiet_generated:
+        warnings = [w for w in warnings if not re.search(r"views\[(modules|changes|mod-[^\]]+)\]", w)]
+    if not errors and not a.no_node:
+        perr, note = pele_check(full, a.svg_dir)
+        errors += perr
+    else:
+        note = "Pele drawing check not run." if a.no_node else ""
+    for line in errors + warnings:
         print(line)
-    if rep.errors or (a.strict and rep.warnings):
-        print(f"\n{len(rep.errors)} error(s), {len(rep.warnings)} warning(s). Fix the errors and run again.")
+    if errors or (a.strict and warnings):
+        print("\n%d error(s), %d warning(s). Fix the errors and run again." % (len(errors), len(warnings)))
         return 1
-    nviews = len(spec["views"])
+    nviews = len(full["views"])
     if a.check:
-        print(f"OK  spec is valid: {nviews} view(s), {len(rep.warnings)} warning(s).")
+        print("OK  spec is valid: %d view(s), %d warning(s). %s" % (nviews, len(warnings), note))
         return 0
-    mode = "offline" if a.offline else "split" if a.split else "cdn"
-    files = build(spec, a.out, mode)
-    size = sum(f.stat().st_size for f in files) / 1e6
-    how = ("loads the Mermaid library from " + CDN_HOST + " when opened (needs internet; if the diagram "
-           "does not appear, rebuild with --offline)") if mode == "cdn" else "works fully offline"
-    print(f"OK  wrote {', '.join(str(f) for f in files)}  ({size:.2f} MB, {nviews} view(s), "
-          f"{len(rep.warnings)} warning(s)). Open it in any browser; it {how}.")
+    mode = "cdn" if a.cdn else "offline"
+    f = build(full, a.out, mode)
+    size = f.stat().st_size / 1e6
+    how = "loads the Pele library from %s when opened (needs internet; rebuild without --cdn for an offline file)" % CDN_HOST \
+        if mode == "cdn" else "works fully offline"
+    nmods = len(full.get("modules", []))
+    print("OK  wrote %s  (%.2f MB, %d view(s)%s, %d warning(s)). %s Open it in any browser; it %s." % (
+        f, size, nviews, ", %d module(s)" % nmods if nmods else "", len(warnings), note, how))
     return 0
 
 

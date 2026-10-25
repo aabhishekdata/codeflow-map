@@ -1,0 +1,99 @@
+{
+  "title": "Full-stack template: how the code works",
+  "subtitle": "FastAPI back end and React front end (fastapi/full-stack-fastapi-template)",
+  "description": "Module notes for the public full-stack FastAPI template. Build with: python scripts/analyze_modules.py <template repo> --select api && python scripts/build_flowmap.py examples/sample-module-notes.json --modules <template repo>/.codeflow/modules.json --out template-map.html",
+  "generated": {
+    "date": "2026-10-25",
+    "commit": "b1125d8",
+    "by": "Copilot (Claude) with codeflow-map",
+    "assumptions": [
+      "Emails are sent only when SMTP settings are configured."
+    ],
+    "open_questions": [
+      "Is there a retention period for deactivated users?"
+    ]
+  },
+  "modules": [
+    {
+      "id": "m-backend-app-api",
+      "label": "Web API",
+      "description": "Receives every request from the website, checks who is asking, and hands the work to the data layer.",
+      "why": "Every user action passes through here, so a fault here is visible to everyone.",
+      "risks": [
+        "Deleting a user also deletes all their items; there is no undo (backend/app/api/routes/users.py:228)."
+      ]
+    },
+    {
+      "id": "m-backend-app",
+      "label": "Data and email",
+      "description": "Defines the users and items tables, the only code that writes them, and the emails the system sends."
+    }
+  ],
+  "functions": [
+    {
+      "id": "backend/app/api/routes/users.py::update_user",
+      "description": "Lets an administrator change another user's details, refusing an email address that someone else already uses."
+    },
+    {
+      "id": "backend/app/crud.py::authenticate",
+      "description": "Checks a sign-in: finds the user by email and compares the password with the stored scrambled (hashed) version."
+    }
+  ],
+  "views": [
+    {
+      "id": "mod-backend-app-api-states",
+      "title": "User account states",
+      "kind": "detail",
+      "module": "m-backend-app-api",
+      "facet": "state",
+      "type": "state",
+      "summary": "The states a user account moves through. New accounts are active straight away (is_active defaults to true).",
+      "states": [
+        {
+          "id": "active",
+          "label": "Active",
+          "description": "Created through the sign-up page or by an administrator; can sign in and manage items.",
+          "files": [
+            "backend/app/models.py:15",
+            "backend/app/api/routes/users.py:147"
+          ]
+        },
+        {
+          "id": "off",
+          "label": "Deactivated",
+          "description": "is_active is false: sign-in is refused.",
+          "files": [
+            "backend/app/api/routes/login.py:35"
+          ]
+        }
+      ],
+      "transitions": [
+        {
+          "from": "*",
+          "to": "active",
+          "label": "signs up or is created"
+        },
+        {
+          "from": "active",
+          "to": "off",
+          "label": "administrator deactivates"
+        },
+        {
+          "from": "off",
+          "to": "active",
+          "label": "administrator reactivates"
+        },
+        {
+          "from": "active",
+          "to": "*",
+          "label": "deleted, with their items"
+        },
+        {
+          "from": "off",
+          "to": "*",
+          "label": "deleted, with their items"
+        }
+      ]
+    }
+  ]
+}
